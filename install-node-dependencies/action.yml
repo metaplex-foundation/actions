@@ -1,0 +1,36 @@
+name: Install Node dependencies
+
+inputs:
+  folder:
+    description: Path to the folder containing the desired package.json (without trailing slash)
+    required: true
+    default: "."
+  command:
+    description: The command to install dependencies
+    required: true
+    default: "pnpm install --frozen-lockfile"
+  cache:
+    description: Whether installed dependencies should be cached
+    required: true
+    default: "true"
+  key:
+    description: A unique key prefix for the cache
+    required: true
+    default: "node"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Cache dependencies
+      if: inputs.cache == 'true'
+      uses: actions/cache@v3
+      with:
+        path: ${{ inputs.folder }}/js/node_modules/
+        key: ${{ runner.os }}-${{ inputs.key }}-${{ hashFiles(format('{0}/pnpm-lock.yaml, {0}/package-lock.json, {0}/yarn.lock', inputs.folder)) }}
+        restore-keys: |
+          ${{ runner.os }}-${{ inputs.key }}
+
+    - name: Install dependencies
+      working-directory: ${{ inputs.folder }}
+      run: ${{ inputs.command }}
+      shell: bash
