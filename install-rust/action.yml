@@ -10,16 +10,16 @@ inputs:
     required: true
     default: "rustfmt,clippy"
 
+outputs:
+  cachekey:
+    description: The hash of the installed rustc
+    value: ${{ steps.rust.outputs.cachekey }}
+  toolchain:
+    description: The name of the installed toolchain
+    value: ${{ steps.rust.outputs.name }}
+
 runs:
   using: "composite"
-  outputs:
-    cachekey:
-      description: The hash of the installed rustc
-      value: ${{ steps.rust.outputs.cachekey }}
-    toolchain:
-      description: The name of the installed toolchain
-      value: ${{ steps.rust.outputs.name }}
-
   steps:
     - name: Install Rust
       id: rust
