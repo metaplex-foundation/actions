@@ -29,10 +29,10 @@ runs:
       env:
         ORIGINAL: ${{ inputs.matrix }}
       run: |
-        CHANGES=$(echo ${{ toJSON(inputs.changes) | sed 's/-/_/g' }})
+        CHANGES=$(echo ${{ toJSON(inputs.changes) }} | sed 's/-/_/g')
         ORIGINAL_KEYS=$(echo $ORIGINAL | jq -c '.[]' | sed 's/"//g')
         CHANGED_KEYS=$(for key in $ORIGINAL_KEYS; do
-          change_key=$(echo $key | sed 's/-/_/g' | sed 's/^/${{ inputs.prefix }}/' | sed 's/$/${{ inputs.suffix }}/')
+          change_key=$(echo $key | sed 's/^/${{ inputs.prefix }}/' | sed 's/$/${{ inputs.suffix }}/' | sed 's/-/_/g')
           index=$(echo $CHANGES | jq -c ". | index(\"$change_key\")")
           if [ $(echo $index) != 'null' ]; then
             echo $key
