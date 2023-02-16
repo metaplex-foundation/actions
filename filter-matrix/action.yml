@@ -1,37 +1,37 @@
-name: Resolve changed program matrix
+name: Filter matrix
 
 inputs:
-  programs:
-    description: A JSON array of all program names
+  matrix:
+    description: A JSON array of names
     required: true
   changes:
     description: A JSON array of changed filters from "dorny/paths-filter"
     required: true
   prefix:
-    description: A prefix to prepend to the program name when searching for filters
+    description: A prefix to prepend to the name when searching for filters
     required: true
     default: ""
   suffix:
-    description: A suffix to append to the program name when searching for filters
+    description: A suffix to append to the name when searching for filters
     required: true
     default: ""
 
 outputs:
-  programs:
-    description: A JSON array of programs that have changed
-    value: ${{ steps.resolver.outputs.matrix }}
+  matrix:
+    description: A JSON array of name that have changed
+    value: ${{ steps.filter.outputs.matrix }}
 
 runs:
   using: "composite"
   steps:
-    - name: Resolve changed program matrix
-      id: resolver
+    - name: Filter matrix
+      id: filter
       env:
-        PROGRAMS: ${{ inputs.programs }}
+        ORIGINAL: ${{ inputs.matrix }}
       run: |
         CHANGES=$(echo ${{ toJSON(inputs.changes) | sed 's/-/_/g' }})
-        KEYS=$(echo $PROGRAMS | jq -c '.[]' | sed 's/"//g')
-        CHANGED_KEYS=$(for key in $KEYS; do
+        ORIGINAL_KEYS=$(echo $ORIGINAL | jq -c '.[]' | sed 's/"//g')
+        CHANGED_KEYS=$(for key in $ORIGINAL_KEYS; do
           change_key=$(echo $key | sed 's/-/_/g' | sed 's/^/${{ inputs.prefix }}/' | sed 's/$/${{ inputs.suffix }}/')
           index=$(echo $CHANGES | jq -c ". | index(\"$change_key\")")
           if [ $(echo $index) != 'null' ]; then
