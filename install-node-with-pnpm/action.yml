@@ -28,7 +28,7 @@ runs:
 
     - name: Install Node.js dependencies
       if: inputs.dependencies == 'true'
-      uses: ../install-node-dependencies
+      uses: ./../install-node-dependencies
       with:
         cache: ${{ inputs.cache }}
         key: "node"
