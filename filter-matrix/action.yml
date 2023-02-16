@@ -29,10 +29,10 @@ runs:
       env:
         ORIGINAL: ${{ inputs.matrix }}
       run: |
-        echo "original matrix: $ORIGINAL"
+        echo "original matrix = $ORIGINAL"
         ORIGINAL_KEYS=$(echo $ORIGINAL | jq -c '.[]' | sed 's/"//g')
 
-        echo "changes: ${{ toJSON(inputs.changes) }}"
+        echo "changes = ${{ toJSON(inputs.changes) }}"
         CHANGES=$(echo ${{ toJSON(inputs.changes) }} | sed 's/-/_/g')
         CHANGED_KEYS=$(for key in $ORIGINAL_KEYS; do
           change_key=$(echo $key | sed 's/^/${{ inputs.prefix }}/' | sed 's/$/${{ inputs.suffix }}/' | sed 's/-/_/g')
@@ -43,6 +43,6 @@ runs:
         done)
 
         FILTERED_MATRIX=$(echo "$CHANGED_KEYS" | jq -R . | jq -sc . | sed 's/""//')
-        echo "filtered matrix: $FILTERED_MATRIX"
+        echo "filtered matrix = $FILTERED_MATRIX"
         echo "matrix=$FILTERED_MATRIX" >> $GITHUB_OUTPUT
       shell: bash
