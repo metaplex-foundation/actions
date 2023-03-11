@@ -18,7 +18,9 @@ runs:
       if: inputs.cache == 'true'
       uses: actions/cache@v3
       with:
-        path: ~/.local/share/solana/install/releases/${{ inputs.version }}
+        path: |
+          ~/.local/share/solana/install/releases/${{ inputs.version }}
+          ~/.cache/solana
         key: ${{ runner.os }}-solana-v${{ inputs.version }}
 
     - name: Install Solana
