@@ -6,6 +6,7 @@ A set of useful GitHub actions for Solana devs.
 - [Cache program dependencies](./cache-program)
 - [Cache all programs dependencies](./cache-programs)
 - [Filter matrix](./filter-matrix)
+- [Install Anchor CLI](./install-anchor-cli)
 - [Install Node dependencies](./install-node-dependencies)
 - [Install Node with PNPM](./install-node-with-pnpm)
 - [Install Rust](./install-rust)

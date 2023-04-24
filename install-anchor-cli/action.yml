@@ -1,0 +1,39 @@
+name: Install Anchor CLI
+
+inputs:
+  version:
+    description: The Anchor CLI version to install
+    required: true
+    default: "0.27.0"
+  cache:
+    description: Whether the downloaded Anchor CLI release should be cached
+    required: true
+    default: "true"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Cache Anchor CLI
+      id: cache
+      if: inputs.cache == 'true'
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/bin/anchor
+        key: ${{ runner.os }}-anchor-cli-v${{ inputs.version }}
+
+    - name: Install Achor CLI
+      if: inputs.cache != 'true' || steps.cache.outputs.cache-hit != 'true'
+      run: |
+        cargo install anchor-cli --version ${{ inputs.version }} --root ~/.cargo
+      shell: bash
+
+    - name: Add Anchor CLI bin to Path
+      run: |
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      shell: bash
+
+    - name: Verify Anchor CLI install
+      run: |
+        anchor --version
+      shell: bash
