@@ -1,0 +1,35 @@
+name: Install cargo-release
+
+inputs:
+  cache:
+    description: Whether the downloaded cargo-release should be cached
+    required: true
+    default: "true"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Cache cargo-release
+      id: cache
+      if: inputs.cache == 'true'
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/bin/cargo-release
+        key: ${{ runner.os }}-cargo-release
+
+    - name: Install cargo-release
+      if: inputs.cache != 'true' || steps.cache.outputs.cache-hit != 'true'
+      run: |
+        cargo install cargo-release --root ~/.cargo
+      shell: bash
+
+    - name: Add cargo-release bin to Path
+      run: |
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      shell: bash
+
+    - name: Verify cargo-release install
+      run: |
+        cargo release --version
+      shell: bash
