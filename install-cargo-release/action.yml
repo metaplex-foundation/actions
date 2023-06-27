@@ -21,7 +21,7 @@ runs:
     - name: Install cargo-release
       if: inputs.cache != 'true' || steps.cache.outputs.cache-hit != 'true'
       run: |
-        cargo install cargo-release --root ~/.cargo
+        cargo install cargo-release --root ~/.cargo --locked
       shell: bash
 
     - name: Add cargo-release bin to Path
