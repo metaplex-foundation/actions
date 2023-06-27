@@ -5,6 +5,10 @@ inputs:
     description: Whether the downloaded cargo-release should be cached
     required: true
     default: "true"
+  locked:
+    description: Whether to use the locked version or not
+    required: false
+    default: "false"
 
 runs:
   using: "composite"
@@ -21,7 +25,10 @@ runs:
     - name: Install cargo-release
       if: inputs.cache != 'true' || steps.cache.outputs.cache-hit != 'true'
       run: |
-        cargo install cargo-release --root ~/.cargo
+        if [ "${{ inputs.locked }}" == "true" ]; then
+          LOCKED="--locked"
+        fi
+        cargo install cargo-release --root ~/.cargo $LOCKED
       shell: bash
 
     - name: Add cargo-release bin to Path
