@@ -23,6 +23,6 @@ runs:
           ~/.cargo/git/db/
           ${{ inputs.folder }}/target/
           ${{ inputs.folder }}/**/target/
-        key: ${{ runner.os }}-${{ inputs.key }}-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-${{ inputs.key }}-${{ hashFiles(format('{0}/**/Cargo.lock', inputs.folder)) }}
         restore-keys: |
           ${{ runner.os }}-${{ inputs.key }}
