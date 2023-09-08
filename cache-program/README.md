@@ -1,5 +1,7 @@
 # Cache program dependencies
 
+> 🚨 Deprecated: Use `@metaplex-foundation/actions/cache-crate@v1` instead.
+
 Cache all folders related to the given folder. This includes Rust global folders and its `target` folder.
 
 ```yaml
