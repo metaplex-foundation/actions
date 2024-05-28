@@ -16,7 +16,7 @@ runs:
     - name: Cache Solana
       id: cache
       if: inputs.cache == 'true'
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: |
           ~/.local/share/solana/install/releases/${{ inputs.version }}

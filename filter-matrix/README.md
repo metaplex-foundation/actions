@@ -33,7 +33,7 @@ jobs:
       program_matrix: ${{ steps.filter.outputs.matrix }}
     steps:
       - name: Git checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Detect changes
         uses: dorny/paths-filter@v2

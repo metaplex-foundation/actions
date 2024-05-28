@@ -27,7 +27,7 @@ runs:
   steps:
     - name: Download program builds
       if: inputs.artifacts != 'false'
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: ${{ inputs.artifacts }}
 

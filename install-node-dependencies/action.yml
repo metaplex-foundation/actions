@@ -23,7 +23,7 @@ runs:
   steps:
     - name: Cache dependencies
       if: inputs.cache == 'true'
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: ${{ inputs.folder }}/js/node_modules/
         key: ${{ runner.os }}-${{ inputs.key }}-${{ hashFiles(format('{0}/pnpm-lock.yaml, {0}/package-lock.json, {0}/yarn.lock', inputs.folder)) }}
