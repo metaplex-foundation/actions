@@ -10,6 +10,9 @@ inputs:
     required: true
     default: "true"
 
+env:
+  BASE_URL: ""
+
 runs:
   using: "composite"
   steps:
@@ -23,10 +26,22 @@ runs:
           ~/.cache/solana
         key: ${{ runner.os }}-solana-v${{ inputs.version }}
 
+    - name: Set install URL
+      id: version_check
+      run: |
+        desired="${{ inputs.version }}"
+        cutoff="1.17.25"
+        if [ "$(printf '%s\n' "$cutoff" "$desired" | sort -V | head -n1)" = "$desired" ] && [ "$cutoff" != "$desired" ]; then
+          echo "BASE_URL='release.solana.com'" >> $GITHUB_ENV
+        else
+          echo "BASE_URL='release.anza.xyz'" >> $GITHUB_ENV
+        fi
+      shell: bash
+
     - name: Install Solana
       if: inputs.cache != 'true' || steps.cache.outputs.cache-hit != 'true'
       run: |
-        sh -c "$(curl -sSfL https://release.solana.com/v${{ inputs.version }}/install)"
+        sh -c "$(curl -sSfL https://${{ env.BASE_URL }}/v${{ inputs.version }}/install)"
       shell: bash
 
     - name: Set Active Solana Version
