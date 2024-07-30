@@ -9,6 +9,9 @@ inputs:
     description: Whether the downloaded Solana release should be cached
     required: true
     default: "true"
+  base_url:
+    description: The base URL to download the Solana release from — e.g. https://release.solana.com.
+    required: false
 
 runs:
   using: "composite"
@@ -23,10 +26,26 @@ runs:
           ~/.cache/solana
         key: ${{ runner.os }}-solana-v${{ inputs.version }}
 
+    - name: Resolve Base URL
+      id: base_url
+      run: |
+        if [ "${{ inputs.base_url }}" != "" ]; then
+          echo "base_url='${{ inputs.base_url }}'" >> $GITHUB_OUTPUT
+        else
+          cutoff="1.18.19"
+          desired="${{ inputs.version }}"
+          if [ "$(printf '%s\n' "$cutoff" "$desired" | sort -V | head -n1)" = "$desired" ] && [ "$cutoff" != "$desired" ]; then
+            echo "base_url='https://release.solana.com'" >> $GITHUB_OUTPUT
+          else
+            echo "base_url='https://release.anza.xyz'" >> $GITHUB_OUTPUT
+          fi
+        fi
+      shell: bash
+
     - name: Install Solana
       if: inputs.cache != 'true' || steps.cache.outputs.cache-hit != 'true'
       run: |
-        sh -c "$(curl -sSfL https://release.solana.com/v${{ inputs.version }}/install)"
+        sh -c "$(curl -sSfL ${{ steps.base_url.output.base_url }}/v${{ inputs.version }}/install)"
       shell: bash
 
     - name: Set Active Solana Version
