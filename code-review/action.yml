@@ -99,4 +99,4 @@ runs:
         prompt: ${{ steps.prompt.outputs.prompt }}
         claude_args: |
           --model ${{ inputs.model }}
-          --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr checkout:*)"
+          --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"

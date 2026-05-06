@@ -95,7 +95,7 @@ jobs:
 
 To re-trigger a review without pushing a new commit, run the workflow manually with the PR number:
 
-```
+```bash
 gh workflow run code-review.yml -f pr_number=123
 ```
 

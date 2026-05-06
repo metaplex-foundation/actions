@@ -6,7 +6,7 @@ You are reviewing a pull request to a Solana program repository. Your job is to 
 **Pull request:** #{{PR_NUMBER}}
 **Review scope:** files matching these globs (anything else is out of scope — do not comment on it):
 
-```
+```text
 {{REVIEW_PATHS}}
 ```
 
