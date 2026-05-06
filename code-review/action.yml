@@ -1,0 +1,102 @@
+name: Code Review
+description: Run a Solana-focused security and quality review on a PR using Claude.
+
+inputs:
+  claude_code_oauth_token:
+    description: Claude Pro/Max OAuth token (preferred). Generate locally with `claude setup-token`. One of this or `anthropic_api_key` is required.
+    required: false
+    default: ""
+  anthropic_api_key:
+    description: Anthropic API key (fallback). Used only if `claude_code_oauth_token` is empty.
+    required: false
+    default: ""
+  paths:
+    description: Newline-separated globs restricting which changed files the review covers.
+    required: false
+    default: "programs/**/*.rs"
+  extra_instructions:
+    description: Markdown appended to the curated baseline prompt under a "Repository-specific guidance" heading.
+    required: false
+    default: ""
+  model:
+    description: The Claude model to use. Passed through to the Claude CLI via `--model`.
+    required: false
+    default: "claude-opus-4-7"
+  pr_number:
+    description: PR number to review. Defaults to the current PR context. Set explicitly when triggering via `workflow_dispatch`.
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Validate auth
+      if: inputs.claude_code_oauth_token == '' && inputs.anthropic_api_key == ''
+      run: |
+        echo "::error::code-review action requires one of claude_code_oauth_token or anthropic_api_key to be set."
+        exit 1
+      shell: bash
+
+    - name: Resolve PR number
+      id: pr
+      env:
+        INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+        EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        if [ -n "$INPUT_PR_NUMBER" ]; then
+          echo "number=$INPUT_PR_NUMBER" >> "$GITHUB_OUTPUT"
+        elif [ -n "$EVENT_PR_NUMBER" ]; then
+          echo "number=$EVENT_PR_NUMBER" >> "$GITHUB_OUTPUT"
+        else
+          echo "::error::Could not determine PR number. Pass pr_number when triggering via workflow_dispatch."
+          exit 1
+        fi
+      shell: bash
+
+    - name: Assemble prompt
+      id: prompt
+      env:
+        REVIEW_PATHS: ${{ inputs.paths }}
+        EXTRA_INSTRUCTIONS: ${{ inputs.extra_instructions }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ steps.pr.outputs.number }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        PROMPT_FILE="$RUNNER_TEMP/code-review-prompt.md"
+
+        python3 - "$ACTION_PATH/prompt.md" "$PROMPT_FILE" <<'PYEOF'
+        import os, sys
+        src, dst = sys.argv[1], sys.argv[2]
+        with open(src) as f:
+            content = f.read()
+        content = (
+            content
+            .replace("{{REPO}}", os.environ.get("REPO", ""))
+            .replace("{{PR_NUMBER}}", os.environ.get("PR_NUMBER", ""))
+            .replace("{{REVIEW_PATHS}}", os.environ.get("REVIEW_PATHS", ""))
+        )
+        extra = os.environ.get("EXTRA_INSTRUCTIONS", "").strip()
+        if extra:
+            content = content.rstrip() + "\n\n## Repository-specific guidance\n\n" + extra + "\n"
+        with open(dst, "w") as f:
+            f.write(content)
+        PYEOF
+
+        {
+          echo "prompt<<__PROMPT_EOF__"
+          cat "$PROMPT_FILE"
+          echo "__PROMPT_EOF__"
+        } >> "$GITHUB_OUTPUT"
+      shell: bash
+
+    - name: Run Claude code review
+      uses: anthropics/claude-code-action@v1
+      with:
+        claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
+        anthropic_api_key: ${{ inputs.anthropic_api_key }}
+        track_progress: "true"
+        prompt: ${{ steps.prompt.outputs.prompt }}
+        claude_args: |
+          --model ${{ inputs.model }}
+          --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr checkout:*)"
