@@ -96,4 +96,4 @@ Apply this checklist to every changed file in scope. Do not invent findings to f
 
 ## Repository-specific guidance
 
-(none — see `extra_instructions` input on the action invocation if your repo has appended any)
+{{EXTRA_INSTRUCTIONS}}

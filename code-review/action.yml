@@ -70,15 +70,15 @@ runs:
         src, dst = sys.argv[1], sys.argv[2]
         with open(src) as f:
             content = f.read()
+        extra = os.environ.get("EXTRA_INSTRUCTIONS", "").strip()
+        extra_block = extra if extra else "_(none — pass `extra_instructions` to the action to add repo-specific invariants here)_"
         content = (
             content
             .replace("{{REPO}}", os.environ.get("REPO", ""))
             .replace("{{PR_NUMBER}}", os.environ.get("PR_NUMBER", ""))
             .replace("{{REVIEW_PATHS}}", os.environ.get("REVIEW_PATHS", ""))
+            .replace("{{EXTRA_INSTRUCTIONS}}", extra_block)
         )
-        extra = os.environ.get("EXTRA_INSTRUCTIONS", "").strip()
-        if extra:
-            content = content.rstrip() + "\n\n## Repository-specific guidance\n\n" + extra + "\n"
         with open(dst, "w") as f:
             f.write(content)
         PYEOF
