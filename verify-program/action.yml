@@ -36,10 +36,24 @@ inputs:
   base-image:
     description: Docker base image used by `solana-verify verify-from-repo` (e.g. `solanafoundation/solana-verifiable-build:1.18.26`). Should match the Solana version that produced the on-chain program
     required: false
-  submit-remote:
-    description: Whether to submit the remote verification job (`solana-verify remote submit-job`) after uploading the PDA
+  repo-visibility:
+    description: |
+      Visibility of the source repository. Must be `public` or `private`.
+      The deterministic build and the on-chain verified-build PDA upload run
+      for both values so the program can still be verified locally. When set
+      to `private`, the public OtterSec verification submission is skipped by
+      default because that service cannot clone a private repository. Use
+      `submit-remote` to override the derived default.
     required: true
-    default: "true"
+    default: "public"
+  submit-remote:
+    description: |
+      Whether to submit the remote verification job (`solana-verify remote
+      submit-job`) after uploading the PDA. Leave empty to derive from
+      `repo-visibility` (`public` -> `true`, `private` -> `false`). Set
+      explicitly to `true` or `false` to override.
+    required: false
+    default: ""
   init-cli-config:
     description: |
       Whether to run `solana config set` before invoking `solana-verify`. solana-verify 0.4.15
@@ -67,6 +81,8 @@ runs:
         INPUT_KEYPAIR: ${{ inputs.keypair }}
         INPUT_REPO_URL: ${{ inputs.repo-url }}
         INPUT_COMMIT_HASH: ${{ inputs.commit-hash }}
+        INPUT_REPO_VISIBILITY: ${{ inputs.repo-visibility }}
+        INPUT_SUBMIT_REMOTE: ${{ inputs.submit-remote }}
       run: |
         set -euo pipefail
 
@@ -103,10 +119,36 @@ runs:
           COMMIT_HASH="${GITHUB_SHA}"
         fi
 
+        case "${INPUT_REPO_VISIBILITY}" in
+          public|private) ;;
+          *)
+            echo "::error::invalid repo-visibility '${INPUT_REPO_VISIBILITY}': expected 'public' or 'private'"
+            exit 1
+            ;;
+        esac
+
+        # Explicit submit-remote overrides; otherwise derive from repo-visibility.
+        SUBMIT_REMOTE="${INPUT_SUBMIT_REMOTE}"
+        case "${SUBMIT_REMOTE}" in
+          true|false) ;;
+          "")
+            if [ "${INPUT_REPO_VISIBILITY}" = "private" ]; then
+              SUBMIT_REMOTE="false"
+            else
+              SUBMIT_REMOTE="true"
+            fi
+            ;;
+          *)
+            echo "::error::invalid submit-remote '${SUBMIT_REMOTE}': expected 'true', 'false', or empty"
+            exit 1
+            ;;
+        esac
+
         printf 'program-id=%s\n' "${PROGRAM_ID}" >> "${GITHUB_OUTPUT}"
         printf 'keypair-abs=%s\n' "${KEYPAIR_ABS}" >> "${GITHUB_OUTPUT}"
         printf 'repo-url=%s\n' "${REPO_URL}" >> "${GITHUB_OUTPUT}"
         printf 'commit-hash=%s\n' "${COMMIT_HASH}" >> "${GITHUB_OUTPUT}"
+        printf 'submit-remote=%s\n' "${SUBMIT_REMOTE}" >> "${GITHUB_OUTPUT}"
       shell: bash
 
     # solana-verify 0.4.15 unconditionally loads ~/.config/solana/cli/config.yml during the
@@ -165,7 +207,7 @@ runs:
       shell: bash
 
     - name: Submit remote verification job
-      if: inputs.submit-remote == 'true'
+      if: steps.resolve.outputs.submit-remote == 'true'
       working-directory: ${{ inputs.working-directory }}
       env:
         PROGRAM_ID: ${{ steps.resolve.outputs.program-id }}

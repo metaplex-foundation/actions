@@ -47,10 +47,27 @@ Upload a verified-build PDA on-chain via [`solana-verify verify-from-repo`](http
   - `mount-path`: Path inside the repository to mount into the verifier container. Defaults to `.`.
   - `working-directory`: Directory to run `solana-verify` from. Defaults to `.`.
   - `base-image`: Docker base image used by `solana-verify verify-from-repo`. Pin this to match the Solana version that produced the on-chain program (e.g. `solanafoundation/solana-verifiable-build:1.18.26`).
-  - `submit-remote`: Whether to submit the remote verification job after uploading the PDA. Defaults to `true`.
+  - `repo-visibility`: `public` or `private`. Defaults to `public`. The deterministic build and on-chain PDA upload always run; `private` only skips the remote OtterSec submission (which has no way to clone a private repo). The on-chain PDA still records the repo URL and commit hash so anyone with repo access can verify locally.
+  - `submit-remote`: Explicit override for the remote verification job. Leave empty (the default) to derive from `repo-visibility` (`public` → `true`, `private` → `false`). Set to `true`/`false` to force a specific behavior.
   - `init-cli-config`: Whether to run `solana config set` before `solana-verify`. Defaults to `true`. Required for `solana-verify 0.4.15` — see [PR #25](https://github.com/metaplex-foundation/mpl-hybrid/pull/25) for context.
 - Outputs:
   - `program-id`: The resolved program ID (pubkey) that was verified. Useful when `program-id-keypair` is used and downstream steps need the pubkey.
+
+## Private repositories
+
+```yaml
+- uses: metaplex-foundation/actions/verify-program@v1
+  with:
+    program-id-keypair: ./program-id.json
+    keypair: ./deployer-key.json
+    rpc-url: ${{ secrets.MAINNET_RPC }}
+    library-name: mpl_hybrid
+    package: mpl-hybrid-program
+    base-image: solanafoundation/solana-verifiable-build:1.18.26
+    repo-visibility: private
+```
+
+For a private repo the action still runs the deterministic verified build and uploads the verified-build PDA on-chain — the PDA records the repo URL and commit hash so anyone with repo access can clone and verify locally with `solana-verify verify-from-repo`. Only the remote OtterSec submission is skipped because that service has no way to clone a private repo. The default for `submit-remote` flips to `false` automatically; pass `submit-remote: true` to override if you have a private-aware verifier.
 
 ## Notes
 
