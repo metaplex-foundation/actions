@@ -34,8 +34,23 @@ inputs:
     required: true
     default: "."
   base-image:
-    description: Docker base image used by `solana-verify verify-from-repo` (e.g. `solanafoundation/solana-verifiable-build:1.18.26`). Should match the Solana version that produced the on-chain program
+    description: |
+      Docker base image used by `solana-verify verify-from-repo`. Must be
+      digest-pinned (e.g. `solanafoundation/solana-verifiable-build@sha256:<digest>`)
+      so a mutable upstream tag cannot change the hash the verifier computes.
+      Should match the digest used to produce the on-chain program. Leave
+      empty to use `solana-verify`'s default image. Set `allow-mutable-tag:
+      true` to bypass the format check (not recommended)
     required: false
+  allow-mutable-tag:
+    description: |
+      Allow `base-image` to use a mutable tag (e.g. `:1.18.26`) instead of a
+      digest pin. Defaults to `false`. Mutable tags can be re-pushed by the
+      registry owner, so the verification hash may not match the on-chain
+      program even when the source has not changed. Only set this to `true`
+      if you accept that risk
+    required: true
+    default: "false"
   repo-visibility:
     description: |
       Visibility of the source repository. Must be `public` or `private`.
@@ -83,8 +98,24 @@ runs:
         INPUT_COMMIT_HASH: ${{ inputs.commit-hash }}
         INPUT_REPO_VISIBILITY: ${{ inputs.repo-visibility }}
         INPUT_SUBMIT_REMOTE: ${{ inputs.submit-remote }}
+        INPUT_BASE_IMAGE: ${{ inputs.base-image }}
+        INPUT_ALLOW_MUTABLE_TAG: ${{ inputs.allow-mutable-tag }}
       run: |
         set -euo pipefail
+
+        # Reject mutable Docker tags by default. A PR-controlled tag (or a
+        # re-pushed upstream tag) can swap the verifier image and silently
+        # produce a hash that no longer matches the on-chain program.
+        # Digest-pinning via `@sha256:<64 hex>` ties verification to one
+        # specific image manifest.
+        if [ -n "${INPUT_BASE_IMAGE}" ] && [[ ! "${INPUT_BASE_IMAGE}" =~ ^[^@[:space:]]+@sha256:[a-f0-9]{64}$ ]]; then
+          if [ "${INPUT_ALLOW_MUTABLE_TAG}" = "true" ]; then
+            echo "::warning::base-image '${INPUT_BASE_IMAGE}' is not digest-pinned (allow-mutable-tag=true). Verification may drift from the on-chain hash."
+          else
+            echo "::error::base-image '${INPUT_BASE_IMAGE}' must be digest-pinned (e.g. <image>@sha256:<digest>). Pass allow-mutable-tag: true to bypass."
+            exit 1
+          fi
+        fi
 
         PROGRAM_ID="${INPUT_PROGRAM_ID}"
         if [ -z "${PROGRAM_ID}" ]; then
