@@ -1,21 +1,24 @@
 # Verify program
 
-Upload a verified-build PDA on-chain via [`solana-verify verify-from-repo`](https://github.com/Ellipsis-Labs/solana-verifiable-build) and (optionally) submit a remote verification job to the OtterSec API. The action bakes in the `solana config set` workaround required by `solana-verify 0.4.15` and resolves sensible defaults so most callers only need to provide a program ID, an uploader keypair, an RPC URL, and the Cargo library name.
+Run one of three [`solana-verify`](https://github.com/Ellipsis-Labs/solana-verifiable-build) flows for a Solana program against a deployed artifact. The `mode` input selects the flow so a single action can cover direct (single-keypair) deployments and multisig (e.g. Squads) deployments without forking the action.
+
+| `mode` | Underlying `solana-verify` call(s) | Required mode-specific inputs | Side effects |
+|---|---|---|---|
+| `verify-from-repo` (default) | `verify-from-repo --keypair ...` (+ optional `remote submit-job`) | `keypair` | Uploads the verified-build PDA from the runner. Optionally notifies OtterSec. |
+| `export-pda-tx` | `export-pda-tx --uploader ...` | `uploader` (multisig pubkey) | Writes the base58 PDA-upload transaction to `output-file` and appends it to `$GITHUB_STEP_SUMMARY`. No keypair on the runner, no on-chain side effect. |
+| `submit-remote-job` | `build` + `get-executable-hash` + `get-program-hash` + diff (+ optional `remote submit-job`) | `uploader` if `submit-remote` resolves to `true` | Rebuilds deterministically, fails the step if the local hash does not match on-chain, then optionally notifies OtterSec. |
 
 `solana-verify` and the Solana CLI must already be on `PATH` (use [`install-solana`](../install-solana) and [`install-solana-verify`](../install-solana-verify) first). A working Docker daemon is required on the runner.
 
+## Mode: `verify-from-repo` (direct deployment)
+
 ```yaml
 - uses: actions/checkout@v4
-
 - uses: metaplex-foundation/actions/install-rust@v1
-
 - uses: metaplex-foundation/actions/install-solana@v1
-  with:
-    version: 1.18.26
-
+  with: { version: 1.18.26 }
 - uses: metaplex-foundation/actions/install-solana-verify@v1
-  with:
-    version: 0.4.15
+  with: { version: 0.4.15 }
 
 - name: Write signer files
   env:
@@ -23,10 +26,11 @@ Upload a verified-build PDA on-chain via [`solana-verify verify-from-repo`](http
     DEPLOYER_KEY: ${{ secrets.DEPLOYER_KEY }}
   run: |
     printf '%s' "$PROGRAM_ID_KEYPAIR" > ./program-id.json
-    printf '%s' "$DEPLOYER_KEY" > ./deployer-key.json
+    printf '%s' "$DEPLOYER_KEY"       > ./deployer-key.json
 
 - uses: metaplex-foundation/actions/verify-program@v1
   with:
+    # mode: verify-from-repo  (default)
     program-id-keypair: ./program-id.json
     keypair: ./deployer-key.json
     rpc-url: ${{ secrets.MAINNET_RPC }}
@@ -35,40 +39,168 @@ Upload a verified-build PDA on-chain via [`solana-verify verify-from-repo`](http
     base-image: solanafoundation/solana-verifiable-build@sha256:ec2e20e1f80607150a71e4c72adfe64be24347ed0b4fb741c32b34eaf7549a25
 ```
 
-- Inputs:
-  - `program-id`: On-chain program ID (pubkey). Either `program-id` or `program-id-keypair` must be provided.
-  - `program-id-keypair`: Path to the program-id keypair file. Used to derive `program-id` when it is not provided explicitly.
-  - `keypair`: Path to the uploader keypair file used to write the verified-build PDA and submit the remote verification job. Must have authority over the program. **Required**.
-  - `rpc-url`: Solana RPC URL. **Required**.
-  - `library-name`: Cargo library name (matches `[lib].name` in `Cargo.toml`). **Required**.
-  - `package`: Cargo package name forwarded after `--`. Required when the workspace has multiple members that could emit the same library filename.
-  - `repo-url`: HTTPS URL of the source repository passed to `solana-verify verify-from-repo`. Defaults to `https://github.com/${GITHUB_REPOSITORY}.git`.
-  - `commit-hash`: Commit hash that produced the on-chain program. Defaults to `${GITHUB_SHA}`.
-  - `mount-path`: Path inside the repository to mount into the verifier container. Defaults to `.`.
-  - `working-directory`: Directory to run `solana-verify` from. Defaults to `.`.
-  - `base-image`: Docker base image used by `solana-verify verify-from-repo`. Must be digest-pinned (`<image>@sha256:<digest>`) so a mutable upstream tag cannot change the hash the verifier computes. Pin this to match the digest used to produce the on-chain program. Leave empty to use `solana-verify`'s default image.
-  - `allow-mutable-tag`: Allow `base-image` to use a mutable tag instead of a digest pin. Defaults to `false`. Mutable tags can be re-pushed by the registry owner, so the verification hash may not match the on-chain program even when the source has not changed. Only set this to `true` if you accept that risk.
-  - `repo-visibility`: `public` or `private`. Defaults to `public`. The deterministic build and on-chain PDA upload always run; `private` only skips the remote OtterSec submission (which has no way to clone a private repo). The on-chain PDA still records the repo URL and commit hash so anyone with repo access can verify locally.
-  - `submit-remote`: Explicit override for the remote verification job. Leave empty (the default) to derive from `repo-visibility` (`public` → `true`, `private` → `false`). Set to `true`/`false` to force a specific behavior.
-  - `init-cli-config`: Whether to run `solana config set` before `solana-verify`. Defaults to `true`. Required for `solana-verify 0.4.15` — see [PR #25](https://github.com/metaplex-foundation/mpl-hybrid/pull/25) for context.
-- Outputs:
-  - `program-id`: The resolved program ID (pubkey) that was verified. Useful when `program-id-keypair` is used and downstream steps need the pubkey.
+## Mode: `export-pda-tx` (Squads / multisig — phase 1)
 
-## Private repositories
+Run during the deploy. Generates the base58 PDA-upload transaction for the multisig vault to execute. No keypair is required on the runner; only the vault pubkey.
 
 ```yaml
 - uses: metaplex-foundation/actions/verify-program@v1
   with:
-    program-id-keypair: ./program-id.json
-    keypair: ./deployer-key.json
+    mode: export-pda-tx
+    program-id: BGUMAp9Gq7iTEuizy4pqaxsTyUCBK68MDfK752saRPUY
+    uploader: bfQVv6niKVgEURYqQ1beJmiEQQN7MrvLRvk3mZGFubb  # Squads vault
     rpc-url: ${{ secrets.MAINNET_RPC }}
-    library-name: mpl_hybrid
-    package: mpl-hybrid-program
+    library-name: bubblegum
+    package: bubblegum
+    mount-path: programs/bubblegum
     base-image: solanafoundation/solana-verifiable-build@sha256:ec2e20e1f80607150a71e4c72adfe64be24347ed0b4fb741c32b34eaf7549a25
-    repo-visibility: private
+    output-file: verify-pda-tx.b58
+
+- uses: actions/upload-artifact@v4
+  with:
+    name: verify-pda-tx
+    path: verify-pda-tx.b58
+    if-no-files-found: error
 ```
 
-For a private repo the action still runs the deterministic verified build and uploads the verified-build PDA on-chain — the PDA records the repo URL and commit hash so anyone with repo access can clone and verify locally with `solana-verify verify-from-repo`. Only the remote OtterSec submission is skipped because that service has no way to clone a private repo. The default for `submit-remote` flips to `false` automatically; pass `submit-remote: true` to override if you have a private-aware verifier.
+The action writes the base58 transaction to `output-file`, appends a `### Verified-build PDA transaction` block to `$GITHUB_STEP_SUMMARY`, and surfaces the transaction as both an `outputs.tx-file` path and an `outputs.tx` raw string for downstream steps.
+
+## Mode: `submit-remote-job` (Squads / multisig — phase 2)
+
+Run after the multisig executes the transaction from phase 1. Rebuilds the program deterministically, fails if the local hash differs from the on-chain hash, and (when `submit-remote` resolves to `true`) notifies OtterSec to do the same comparison.
+
+```yaml
+- uses: metaplex-foundation/actions/verify-program@v1
+  with:
+    mode: submit-remote-job
+    program-id: BGUMAp9Gq7iTEuizy4pqaxsTyUCBK68MDfK752saRPUY
+    uploader: bfQVv6niKVgEURYqQ1beJmiEQQN7MrvLRvk3mZGFubb  # required if submit-remote=true
+    rpc-url: ${{ secrets.MAINNET_RPC }}
+    library-name: bubblegum
+    package: bubblegum
+    mount-path: programs/bubblegum
+    base-image: solanafoundation/solana-verifiable-build@sha256:ec2e20e1f80607150a71e4c72adfe64be24347ed0b4fb741c32b34eaf7549a25
+    submit-remote: true
+```
+
+Setting `submit-remote: false` makes this mode a pre-flight check only: it builds and compares hashes without contacting OtterSec.
+
+## Bubblegum-style operator workflow (both phases, same action)
+
+A workflow that lets an operator pick a phase from `workflow_dispatch.inputs.mode` and pipes it straight into the action:
+
+```yaml
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref: { type: string, required: true }
+      mode:
+        type: choice
+        required: true
+        default: submit-remote-job
+        options: [export-pda-tx, submit-remote-job]
+
+env:
+  SOLANA_VERIFY_BASE_IMAGE: solanafoundation/solana-verifiable-build@sha256:ec2e20e1f80607150a71e4c72adfe64be24347ed0b4fb741c32b34eaf7549a25
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest-16-cores
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ inputs.git_ref }}" }
+      - uses: metaplex-foundation/actions/install-rust@v1
+      - uses: metaplex-foundation/actions/install-solana@v1
+        with: { version: 1.18.26 }
+      - uses: metaplex-foundation/actions/install-solana-verify@v1
+        with: { version: 0.4.15 }
+
+      - uses: metaplex-foundation/actions/verify-program@v1
+        with:
+          mode: ${{ inputs.mode }}
+          program-id: BGUMAp9Gq7iTEuizy4pqaxsTyUCBK68MDfK752saRPUY
+          uploader: bfQVv6niKVgEURYqQ1beJmiEQQN7MrvLRvk3mZGFubb
+          rpc-url: ${{ secrets.MAINNET_RPC }}
+          library-name: bubblegum
+          package: bubblegum
+          mount-path: programs/bubblegum
+          base-image: ${{ env.SOLANA_VERIFY_BASE_IMAGE }}
+          submit-remote: true
+
+      - if: inputs.mode == 'export-pda-tx'
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-pda-tx
+          path: verify-pda-tx.b58
+```
+
+## Inputs
+
+Inputs are organized by which mode(s) they apply to. The mode is validated in the resolve step and the action fails fast with a clear error when a mode-required input is missing.
+
+### All modes
+
+| Input | Required | Default | Notes |
+|---|---|---|---|
+| `mode` | yes | `verify-from-repo` | One of `verify-from-repo`, `export-pda-tx`, `submit-remote-job`. |
+| `program-id` | one of these | — | Pubkey of the deployed program. |
+| `program-id-keypair` | one of these | — | Path to the program-id keypair file; the action derives `program-id` via `solana-keygen pubkey`. |
+| `rpc-url` | yes | — | Solana RPC URL. |
+| `library-name` | yes | — | Cargo library name (`[lib].name`). |
+| `package` | no | — | Cargo package name forwarded after `--`. Required when the workspace has multiple members that emit the same library filename. |
+| `mount-path` | yes | `.` | Path inside the repo to mount into the verifier container. Use e.g. `programs/bubblegum` when the Cargo workspace is nested. |
+| `working-directory` | yes | `.` | Directory `solana-verify` runs from. |
+| `base-image` | no | `solana-verify`'s default | Must be digest-pinned (`<image>@sha256:<64 hex>`). Set `allow-mutable-tag: true` to bypass. |
+| `allow-mutable-tag` | yes | `false` | Allow a mutable tag for `base-image` (not recommended). |
+| `init-cli-config` | yes | `true` | Whether to run `solana config set` before `solana-verify`. Required for `solana-verify 0.4.15`'s PDA upload path. |
+
+### `verify-from-repo` mode
+
+| Input | Required | Default | Notes |
+|---|---|---|---|
+| `keypair` | yes | — | Uploader keypair file. The action derives the `uploader` pubkey via `solana-keygen pubkey`. |
+| `repo-url` | no | `https://github.com/${GITHUB_REPOSITORY}.git` | HTTPS URL passed to `verify-from-repo`. |
+| `commit-hash` | no | `${GITHUB_SHA}` | Commit that produced the on-chain program. |
+
+### `export-pda-tx` mode
+
+| Input | Required | Default | Notes |
+|---|---|---|---|
+| `uploader` | yes | — | Pubkey that will execute the PDA-upload transaction (multisig vault). Must be the program's upgrade authority for Solana Explorer to show the verified badge. |
+| `repo-url` | no | `https://github.com/${GITHUB_REPOSITORY}.git` | HTTPS URL passed to `export-pda-tx`. |
+| `commit-hash` | no | `${GITHUB_SHA}` | Commit that produced the on-chain program. |
+| `output-file` | yes | `verify-pda-tx.b58` | Path (relative to `working-directory`) for the base58 transaction file. |
+| `emit-summary` | yes | `true` | Whether to append a `### Verified-build PDA transaction` block to `$GITHUB_STEP_SUMMARY`. |
+| `encoding` | yes | `base58` | Forwarded to `export-pda-tx --encoding`. |
+| `compute-unit-price` | yes | `0` | Forwarded to `export-pda-tx --compute-unit-price`. |
+
+### `submit-remote-job` mode
+
+| Input | Required | Default | Notes |
+|---|---|---|---|
+| `uploader` | yes if `submit-remote` resolves to `true` | — | Pubkey passed to `solana-verify remote submit-job --uploader`. Should match whoever uploaded the verified-build PDA (e.g. the multisig vault). |
+
+### Submit-remote handling (verify-from-repo and submit-remote-job)
+
+| Input | Required | Default | Notes |
+|---|---|---|---|
+| `repo-visibility` | yes | `public` | `public` or `private`. Drives the default of `submit-remote`. |
+| `submit-remote` | no | derived from `repo-visibility` (`public` → `true`, `private` → `false`) | Explicit `true`/`false` overrides. Setting `true` in `export-pda-tx` mode is rejected — the PDA has not been written on-chain yet, so re-run with `mode: submit-remote-job` after the multisig executes. |
+
+## Outputs
+
+| Output | Modes | Notes |
+|---|---|---|
+| `program-id` | all | Resolved program ID (pubkey). |
+| `uploader` | all | Resolved uploader pubkey. Useful when the action derived it from `keypair`. |
+| `tx-file` | `export-pda-tx` | Path of the base58 PDA-upload transaction file. |
+| `tx` | `export-pda-tx` | The base58 PDA-upload transaction itself, suitable for piping into downstream steps. |
+| `local-hash` | `submit-remote-job` | Local executable hash from the deterministic rebuild. |
+| `onchain-hash` | `submit-remote-job` | On-chain program hash from `solana-verify get-program-hash`. |
+
+## Private repositories
+
+When `repo-visibility: private`, `submit-remote` defaults to `false` because the OtterSec verifier has no way to clone a private repo. The on-chain side effects of each mode (PDA upload in `verify-from-repo`, transaction generation in `export-pda-tx`, hash compare in `submit-remote-job`) still run, so anyone with repo access can verify locally with `solana-verify verify-from-repo`. Override with `submit-remote: true` if your setup has a private-aware verifier.
 
 ## Pinning the base image
 
@@ -86,18 +218,9 @@ Hard-code the result in the caller workflow's `env:` block — **not** in `.gith
 ```yaml
 env:
   SOLANA_VERIFY_BASE_IMAGE: solanafoundation/solana-verifiable-build@sha256:ec2e20e1f80607150a71e4c72adfe64be24347ed0b4fb741c32b34eaf7549a25
-
-jobs:
-  verify:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: metaplex-foundation/actions/verify-program@v1
-        with:
-          base-image: ${{ env.SOLANA_VERIFY_BASE_IMAGE }}
-          # ...
 ```
 
-If the workflow also grep-loads `.github/.env` into `$GITHUB_ENV`, exclude `SOLANA_VERIFY_BASE_IMAGE` from the allowlist so a re-introduced entry can't override the workflow-level pin (`$GITHUB_ENV` wins over `env:` for subsequent steps):
+If the workflow also grep-loads `.github/.env` into `$GITHUB_ENV`, exclude `SOLANA_VERIFY_BASE_IMAGE` from the allowlist so a re-introduced entry cannot override the workflow-level pin (`$GITHUB_ENV` wins over `env:` for subsequent steps):
 
 ```yaml
 - run: |
@@ -107,6 +230,7 @@ If the workflow also grep-loads `.github/.env` into `$GITHUB_ENV`, exclude `SOLA
 
 ## Notes
 
-- The action does **not** run the deterministic build itself. Use [`verified-build`](../verified-build) to produce a matching `.so` (or rely on `solana-verify verify-from-repo` to build inside the container from the resolved `commit-hash`).
-- `solana-verify 0.4.15` reads `~/.config/solana/cli/config.yml` during the PDA upload regardless of `--url`/`--keypair`. The `Initialize Solana CLI config` step writes that file before the upload to avoid `No such file or directory (os error 2)` failures on clean runners.
+- The action does **not** run a standalone deterministic build in `verify-from-repo` or `export-pda-tx` modes — `solana-verify` does that internally inside the verifier container. `submit-remote-job` mode runs `solana-verify build` on the runner so the local hash can be compared to on-chain.
+- `solana-verify 0.4.15` reads `~/.config/solana/cli/config.yml` during the PDA upload regardless of `--url`/`--keypair`. The `Initialize Solana CLI config` step writes that file before the upload to avoid `No such file or directory (os error 2)` failures on clean runners. The step runs in all modes; the `--keypair` flag is omitted when no keypair was provided.
 - `keypair` is resolved to an absolute path before being passed to `solana config set`, so the CLI config stays valid even if a later step changes the working directory.
+- `export-pda-tx`'s stdout interleaves docker progress with the encoded transaction. The action extracts the longest pure-base58 line of at least 100 characters; if `solana-verify`'s output format ever changes this heuristic may need updating.
