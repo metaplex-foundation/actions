@@ -1,0 +1,50 @@
+name: Install solana-verify
+
+inputs:
+  version:
+    description: The solana-verify version to install
+    required: true
+    default: "0.4.15"
+  cache:
+    description: Whether the installed solana-verify binary should be cached
+    required: true
+    default: "true"
+  install-system-deps:
+    description: Whether to install the Linux build dependencies (libudev-dev, pkg-config) that solana-verify requires
+    required: true
+    default: "true"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Linux build dependencies
+      if: inputs.install-system-deps == 'true' && runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libudev-dev pkg-config
+      shell: bash
+
+    - name: Cache solana-verify
+      id: cache
+      if: inputs.cache == 'true'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/bin/solana-verify
+        key: ${{ runner.os }}-solana-verify-${{ inputs.version }}
+
+    - name: Install solana-verify
+      if: inputs.cache != 'true' || steps.cache.outputs.cache-hit != 'true'
+      run: |
+        cargo install solana-verify --locked --force --version "${{ inputs.version }}" --root ~/.cargo
+      shell: bash
+
+    - name: Add Cargo bin to Path
+      run: |
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      shell: bash
+
+    - name: Verify solana-verify install
+      run: |
+        solana-verify --version
+      shell: bash

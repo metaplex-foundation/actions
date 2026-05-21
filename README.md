@@ -11,4 +11,7 @@ A set of useful GitHub actions for Solana devs.
 - [Install Node with PNPM](./install-node-with-pnpm)
 - [Install Rust](./install-rust)
 - [Install Solana](./install-solana)
+- [Install solana-verify](./install-solana-verify)
 - [Start a local validator](./start-validator)
+- [Verified build](./verified-build)
+- [Verify program](./verify-program)

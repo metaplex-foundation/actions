@@ -1,0 +1,181 @@
+name: Verify program
+
+inputs:
+  program-id:
+    description: On-chain program ID (pubkey) to verify. Either `program-id` or `program-id-keypair` must be provided
+    required: false
+  program-id-keypair:
+    description: Path to the program-id keypair file. Used to derive `program-id` when it is not provided explicitly
+    required: false
+  keypair:
+    description: Path to the uploader keypair used to write the verified-build PDA and to submit the remote verification job. Must have authority over the program
+    required: true
+  rpc-url:
+    description: Solana RPC URL the program is deployed to
+    required: true
+  library-name:
+    description: Cargo library name of the program (matches `[lib].name` in Cargo.toml, e.g. `mpl_hybrid`)
+    required: true
+  package:
+    description: Cargo package name forwarded to `solana-verify verify-from-repo` after `--`. Required when the workspace has multiple members that could emit the same library filename
+    required: false
+  repo-url:
+    description: HTTPS URL of the source repository passed to `solana-verify verify-from-repo`. Defaults to `https://github.com/${GITHUB_REPOSITORY}.git`
+    required: false
+  commit-hash:
+    description: Commit hash that produced the on-chain program. Defaults to `${GITHUB_SHA}`
+    required: false
+  mount-path:
+    description: Path inside the repository to mount into the verifier container. Defaults to `.`
+    required: true
+    default: "."
+  working-directory:
+    description: Directory to run `solana-verify` from. Defaults to `.`
+    required: true
+    default: "."
+  base-image:
+    description: Docker base image used by `solana-verify verify-from-repo` (e.g. `solanafoundation/solana-verifiable-build:1.18.26`). Should match the Solana version that produced the on-chain program
+    required: false
+  submit-remote:
+    description: Whether to submit the remote verification job (`solana-verify remote submit-job`) after uploading the PDA
+    required: true
+    default: "true"
+  init-cli-config:
+    description: |
+      Whether to run `solana config set` before invoking `solana-verify`. solana-verify 0.4.15
+      unconditionally loads `~/.config/solana/cli/config.yml` during the PDA upload (see
+      Ellipsis-Labs/solana-verifiable-build `process_otter_verify_ixs`) and fails on GitHub
+      runners with `No such file or directory (os error 2)` when the config does not exist.
+      Set to `false` only if a CLI config already exists on the runner.
+    required: true
+    default: "true"
+
+outputs:
+  program-id:
+    description: The resolved program ID (pubkey) that was verified
+    value: ${{ steps.resolve.outputs.program-id }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Resolve inputs
+      id: resolve
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        INPUT_PROGRAM_ID: ${{ inputs.program-id }}
+        INPUT_PROGRAM_ID_KEYPAIR: ${{ inputs.program-id-keypair }}
+        INPUT_KEYPAIR: ${{ inputs.keypair }}
+        INPUT_REPO_URL: ${{ inputs.repo-url }}
+        INPUT_COMMIT_HASH: ${{ inputs.commit-hash }}
+      run: |
+        set -euo pipefail
+
+        PROGRAM_ID="${INPUT_PROGRAM_ID}"
+        if [ -z "${PROGRAM_ID}" ]; then
+          if [ -z "${INPUT_PROGRAM_ID_KEYPAIR}" ]; then
+            echo "::error::either 'program-id' or 'program-id-keypair' must be provided"
+            exit 1
+          fi
+          if [ ! -f "${INPUT_PROGRAM_ID_KEYPAIR}" ]; then
+            echo "::error::program-id-keypair file not found: ${INPUT_PROGRAM_ID_KEYPAIR}"
+            exit 1
+          fi
+          PROGRAM_ID="$(solana-keygen pubkey "${INPUT_PROGRAM_ID_KEYPAIR}")"
+        fi
+
+        if [ ! -f "${INPUT_KEYPAIR}" ]; then
+          echo "::error::keypair file not found: ${INPUT_KEYPAIR}"
+          exit 1
+        fi
+        if [[ "${INPUT_KEYPAIR}" = /* ]]; then
+          KEYPAIR_ABS="${INPUT_KEYPAIR}"
+        else
+          KEYPAIR_ABS="$(pwd)/${INPUT_KEYPAIR}"
+        fi
+
+        REPO_URL="${INPUT_REPO_URL}"
+        if [ -z "${REPO_URL}" ]; then
+          REPO_URL="https://github.com/${GITHUB_REPOSITORY}.git"
+        fi
+
+        COMMIT_HASH="${INPUT_COMMIT_HASH}"
+        if [ -z "${COMMIT_HASH}" ]; then
+          COMMIT_HASH="${GITHUB_SHA}"
+        fi
+
+        printf 'program-id=%s\n' "${PROGRAM_ID}" >> "${GITHUB_OUTPUT}"
+        printf 'keypair-abs=%s\n' "${KEYPAIR_ABS}" >> "${GITHUB_OUTPUT}"
+        printf 'repo-url=%s\n' "${REPO_URL}" >> "${GITHUB_OUTPUT}"
+        printf 'commit-hash=%s\n' "${COMMIT_HASH}" >> "${GITHUB_OUTPUT}"
+      shell: bash
+
+    # solana-verify 0.4.15 unconditionally loads ~/.config/solana/cli/config.yml during the
+    # PDA upload (process_otter_verify_ixs in Ellipsis-Labs/solana-verifiable-build), so seed
+    # the CLI config even though --keypair and --url are passed explicitly below. Without this
+    # step the upload fails with `No such file or directory (os error 2)` on a fresh runner.
+    - name: Initialize Solana CLI config
+      if: inputs.init-cli-config == 'true'
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        RPC_URL: ${{ inputs.rpc-url }}
+        KEYPAIR_ABS: ${{ steps.resolve.outputs.keypair-abs }}
+      run: |
+        set -euo pipefail
+        solana config set \
+          --url "${RPC_URL}" \
+          --keypair "${KEYPAIR_ABS}"
+      shell: bash
+
+    - name: Upload verified-build PDA
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        PROGRAM_ID: ${{ steps.resolve.outputs.program-id }}
+        RPC_URL: ${{ inputs.rpc-url }}
+        KEYPAIR: ${{ inputs.keypair }}
+        REPO_URL: ${{ steps.resolve.outputs.repo-url }}
+        COMMIT_HASH: ${{ steps.resolve.outputs.commit-hash }}
+        LIBRARY_NAME: ${{ inputs.library-name }}
+        PACKAGE_NAME: ${{ inputs.package }}
+        MOUNT_PATH: ${{ inputs.mount-path }}
+        BASE_IMAGE: ${{ inputs.base-image }}
+      run: |
+        set -euo pipefail
+
+        ARGS=(
+          solana-verify verify-from-repo
+          --current-dir
+          --program-id "${PROGRAM_ID}"
+          --url "${RPC_URL}"
+          --keypair "${KEYPAIR}"
+          --library-name "${LIBRARY_NAME}"
+          --mount-path "${MOUNT_PATH}"
+          --commit-hash "${COMMIT_HASH}"
+          --skip-prompt
+        )
+        if [ -n "${BASE_IMAGE}" ]; then
+          ARGS+=(--base-image "${BASE_IMAGE}")
+        fi
+        ARGS+=("${REPO_URL}")
+        if [ -n "${PACKAGE_NAME}" ]; then
+          ARGS+=(-- --package "${PACKAGE_NAME}")
+        fi
+
+        echo "+ ${ARGS[*]}"
+        "${ARGS[@]}"
+      shell: bash
+
+    - name: Submit remote verification job
+      if: inputs.submit-remote == 'true'
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        PROGRAM_ID: ${{ steps.resolve.outputs.program-id }}
+        RPC_URL: ${{ inputs.rpc-url }}
+        KEYPAIR: ${{ inputs.keypair }}
+      run: |
+        set -euo pipefail
+        UPLOADER="$(solana-keygen pubkey "${KEYPAIR}")"
+        solana-verify remote submit-job \
+          --url "${RPC_URL}" \
+          --program-id "${PROGRAM_ID}" \
+          --uploader "${UPLOADER}"
+      shell: bash
