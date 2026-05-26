@@ -53,13 +53,21 @@ inputs:
     required: true
     default: "."
 
+  solana-version:
+    description: |
+      Solana version that produced the on-chain program. When `base-image` is
+      not provided, the action resolves this against `solana-verify-base-images.json`
+      at the actions repo root and uses the matching digest-pinned image.
+      Pass `base-image` explicitly to override the lookup or to use a version
+      that is not yet in the table
+    required: false
   base-image:
     description: |
       Docker base image used by `solana-verify`. Must be digest-pinned
       (`<image>@sha256:<digest>`) so a mutable upstream tag cannot change the
-      hash the verifier computes. Leave empty to use `solana-verify`'s default
-      image. Set `allow-mutable-tag: true` to bypass the format check (not
-      recommended)
+      hash the verifier computes. Takes precedence over `solana-version`.
+      Leave both empty to use `solana-verify`'s default image. Set
+      `allow-mutable-tag: true` to bypass the format check (not recommended)
     required: false
   allow-mutable-tag:
     description: |
@@ -143,6 +151,9 @@ outputs:
   uploader:
     description: The resolved uploader pubkey used for the PDA / remote submit
     value: ${{ steps.resolve.outputs.uploader }}
+  base-image:
+    description: The resolved digest-pinned base image (from `base-image` input or `solana-version` lookup)
+    value: ${{ steps.resolve.outputs.base-image }}
   tx-file:
     description: Path of the base58 PDA-upload transaction file produced in `export-pda-tx` mode
     value: ${{ steps.export.outputs.tx-file }}
@@ -172,8 +183,10 @@ runs:
         INPUT_COMMIT_HASH: ${{ inputs.commit-hash }}
         INPUT_REPO_VISIBILITY: ${{ inputs.repo-visibility }}
         INPUT_SUBMIT_REMOTE: ${{ inputs.submit-remote }}
+        INPUT_SOLANA_VERSION: ${{ inputs.solana-version }}
         INPUT_BASE_IMAGE: ${{ inputs.base-image }}
         INPUT_ALLOW_MUTABLE_TAG: ${{ inputs.allow-mutable-tag }}
+        ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
 
@@ -185,14 +198,31 @@ runs:
             ;;
         esac
 
+        # Resolve base-image: explicit input wins, otherwise look up by
+        # solana-version against the table at the actions repo root.
+        BASE_IMAGE="${INPUT_BASE_IMAGE}"
+        if [ -z "${BASE_IMAGE}" ] && [ -n "${INPUT_SOLANA_VERSION}" ]; then
+          LOOKUP_FILE="${ACTION_PATH%/}/../solana-verify-base-images.json"
+          if [ ! -f "${LOOKUP_FILE}" ]; then
+            echo "::error::solana-version lookup table not found at ${LOOKUP_FILE}"
+            exit 1
+          fi
+          BASE_IMAGE=$(jq -r --arg v "${INPUT_SOLANA_VERSION}" '.images[$v] // empty' "${LOOKUP_FILE}")
+          if [ -z "${BASE_IMAGE}" ]; then
+            KNOWN=$(jq -r '.images | keys | join(", ")' "${LOOKUP_FILE}")
+            echo "::error::no known digest for solana-version '${INPUT_SOLANA_VERSION}'. Pass 'base-image' explicitly or add an entry to solana-verify-base-images.json. Known versions: ${KNOWN}"
+            exit 1
+          fi
+        fi
+
         # Reject mutable Docker tags by default. A PR-controlled tag (or a
         # re-pushed upstream tag) can swap the verifier image and silently
         # produce a hash that no longer matches the on-chain program.
-        if [ -n "${INPUT_BASE_IMAGE}" ] && [[ ! "${INPUT_BASE_IMAGE}" =~ ^[^@[:space:]]+@sha256:[a-f0-9]{64}$ ]]; then
+        if [ -n "${BASE_IMAGE}" ] && [[ ! "${BASE_IMAGE}" =~ ^[^@[:space:]]+@sha256:[a-f0-9]{64}$ ]]; then
           if [ "${INPUT_ALLOW_MUTABLE_TAG}" = "true" ]; then
-            echo "::warning::base-image '${INPUT_BASE_IMAGE}' is not digest-pinned (allow-mutable-tag=true). Verification may drift from the on-chain hash."
+            echo "::warning::base-image '${BASE_IMAGE}' is not digest-pinned (allow-mutable-tag=true). Verification may drift from the on-chain hash."
           else
-            echo "::error::base-image '${INPUT_BASE_IMAGE}' must be digest-pinned (e.g. <image>@sha256:<digest>). Pass allow-mutable-tag: true to bypass."
+            echo "::error::base-image '${BASE_IMAGE}' must be digest-pinned (e.g. <image>@sha256:<digest>). Pass allow-mutable-tag: true to bypass."
             exit 1
           fi
         fi
@@ -308,6 +338,7 @@ runs:
         printf 'repo-url=%s\n'       "${REPO_URL}"       >> "${GITHUB_OUTPUT}"
         printf 'commit-hash=%s\n'    "${COMMIT_HASH}"    >> "${GITHUB_OUTPUT}"
         printf 'submit-remote=%s\n'  "${SUBMIT_REMOTE}"  >> "${GITHUB_OUTPUT}"
+        printf 'base-image=%s\n'     "${BASE_IMAGE}"     >> "${GITHUB_OUTPUT}"
       shell: bash
 
     # solana-verify 0.4.15 unconditionally loads ~/.config/solana/cli/config.yml
@@ -343,7 +374,7 @@ runs:
         LIBRARY_NAME: ${{ inputs.library-name }}
         PACKAGE_NAME: ${{ inputs.package }}
         MOUNT_PATH: ${{ inputs.mount-path }}
-        BASE_IMAGE: ${{ inputs.base-image }}
+        BASE_IMAGE: ${{ steps.resolve.outputs.base-image }}
       run: |
         set -euo pipefail
 
@@ -383,7 +414,7 @@ runs:
         LIBRARY_NAME: ${{ inputs.library-name }}
         PACKAGE_NAME: ${{ inputs.package }}
         MOUNT_PATH: ${{ inputs.mount-path }}
-        BASE_IMAGE: ${{ inputs.base-image }}
+        BASE_IMAGE: ${{ steps.resolve.outputs.base-image }}
         OUTPUT_FILE: ${{ inputs.output-file }}
         EMIT_SUMMARY: ${{ inputs.emit-summary }}
         ENCODING: ${{ inputs.encoding }}
@@ -466,7 +497,7 @@ runs:
         LIBRARY_NAME: ${{ inputs.library-name }}
         PACKAGE_NAME: ${{ inputs.package }}
         MOUNT_PATH: ${{ inputs.mount-path }}
-        BASE_IMAGE: ${{ inputs.base-image }}
+        BASE_IMAGE: ${{ steps.resolve.outputs.base-image }}
       run: |
         set -euo pipefail
 

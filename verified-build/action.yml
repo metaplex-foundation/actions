@@ -7,13 +7,22 @@ inputs:
   package:
     description: Cargo package name passed to `solana-verify build` after `--`. Required when the workspace has multiple members that could emit the same library filename
     required: false
+  solana-version:
+    description: |
+      Solana version that produced the on-chain program. When `base-image` is
+      not provided, the action resolves this against `solana-verify-base-images.json`
+      at the actions repo root and uses the matching digest-pinned image.
+      Pass `base-image` explicitly to override the lookup or to use a version
+      that is not yet in the table
+    required: false
   base-image:
     description: |
       Docker base image for the deterministic build. Must be digest-pinned
       (e.g. `solanafoundation/solana-verifiable-build@sha256:<digest>`) so a
       mutable upstream tag cannot change the resulting `.so` hash between
-      runs. Leave empty to use `solana-verify`'s default image. Set
-      `allow-mutable-tag: true` to bypass the format check (not recommended)
+      runs. Takes precedence over `solana-version`. Leave both empty to use
+      `solana-verify`'s default image. Set `allow-mutable-tag: true` to bypass
+      the format check (not recommended)
     required: false
   allow-mutable-tag:
     description: |
@@ -48,12 +57,30 @@ runs:
       env:
         LIBRARY_NAME: ${{ inputs.library-name }}
         PACKAGE_NAME: ${{ inputs.package }}
+        SOLANA_VERSION: ${{ inputs.solana-version }}
         BASE_IMAGE: ${{ inputs.base-image }}
         ALLOW_MUTABLE_TAG: ${{ inputs.allow-mutable-tag }}
         OUTPUT_DIR: ${{ inputs.output-dir }}
         EXTRA_ARGS: ${{ inputs.extra-args }}
+        ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
+
+        # Resolve base-image: explicit input wins, otherwise look up by
+        # solana-version against the table at the actions repo root.
+        if [ -z "${BASE_IMAGE}" ] && [ -n "${SOLANA_VERSION}" ]; then
+          LOOKUP_FILE="${ACTION_PATH%/}/../solana-verify-base-images.json"
+          if [ ! -f "${LOOKUP_FILE}" ]; then
+            echo "::error::solana-version lookup table not found at ${LOOKUP_FILE}"
+            exit 1
+          fi
+          BASE_IMAGE=$(jq -r --arg v "${SOLANA_VERSION}" '.images[$v] // empty' "${LOOKUP_FILE}")
+          if [ -z "${BASE_IMAGE}" ]; then
+            KNOWN=$(jq -r '.images | keys | join(", ")' "${LOOKUP_FILE}")
+            echo "::error::no known digest for solana-version '${SOLANA_VERSION}'. Pass 'base-image' explicitly or add an entry to solana-verify-base-images.json. Known versions: ${KNOWN}"
+            exit 1
+          fi
+        fi
 
         # Reject mutable Docker tags by default. A PR-controlled tag (or a
         # re-pushed upstream tag) can swap the verified-build image and
