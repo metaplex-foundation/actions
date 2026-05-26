@@ -1,0 +1,104 @@
+name: Verified build
+
+inputs:
+  library-name:
+    description: Cargo library name to build (matches `[lib].name` in the program's Cargo.toml)
+    required: true
+  package:
+    description: Cargo package name passed to `solana-verify build` after `--`. Required when the workspace has multiple members that could emit the same library filename
+    required: false
+  base-image:
+    description: |
+      Docker base image for the deterministic build. Must be digest-pinned
+      (e.g. `solanafoundation/solana-verifiable-build@sha256:<digest>`) so a
+      mutable upstream tag cannot change the resulting `.so` hash between
+      runs. Leave empty to use `solana-verify`'s default image. Set
+      `allow-mutable-tag: true` to bypass the format check (not recommended)
+    required: false
+  allow-mutable-tag:
+    description: |
+      Allow `base-image` to use a mutable tag (e.g. `:1.18.26`) instead of a
+      digest pin. Defaults to `false`. Mutable tags can be re-pushed by the
+      registry owner, so two builds at the same git commit may produce
+      different binaries. Only set this to `true` if you accept that risk
+    required: true
+    default: "false"
+  working-directory:
+    description: Directory to run `solana-verify build` from
+    required: true
+    default: "."
+  output-dir:
+    description: Directory (relative to `working-directory`) to copy the built `.so` into. Leave empty to keep the artifact in `target/deploy` only
+    required: false
+  extra-args:
+    description: Additional arguments forwarded verbatim to the inner `cargo build-sbf` invocation (after `--`)
+    required: false
+
+outputs:
+  binary-path:
+    description: Path to the produced `.so` relative to `working-directory`
+    value: ${{ steps.build.outputs.binary-path }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Run solana-verify build
+      id: build
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        LIBRARY_NAME: ${{ inputs.library-name }}
+        PACKAGE_NAME: ${{ inputs.package }}
+        BASE_IMAGE: ${{ inputs.base-image }}
+        ALLOW_MUTABLE_TAG: ${{ inputs.allow-mutable-tag }}
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+        EXTRA_ARGS: ${{ inputs.extra-args }}
+      run: |
+        set -euo pipefail
+
+        # Reject mutable Docker tags by default. A PR-controlled tag (or a
+        # re-pushed upstream tag) can swap the verified-build image and
+        # silently change the .so hash. Digest-pinning via `@sha256:<64 hex>`
+        # ties the build to one specific image manifest.
+        if [ -n "${BASE_IMAGE}" ] && [[ ! "${BASE_IMAGE}" =~ ^[^@[:space:]]+@sha256:[a-f0-9]{64}$ ]]; then
+          if [ "${ALLOW_MUTABLE_TAG}" = "true" ]; then
+            echo "::warning::base-image '${BASE_IMAGE}' is not digest-pinned (allow-mutable-tag=true). Builds may not be reproducible."
+          else
+            echo "::error::base-image '${BASE_IMAGE}' must be digest-pinned (e.g. <image>@sha256:<digest>). Pass allow-mutable-tag: true to bypass."
+            exit 1
+          fi
+        fi
+
+        ARGS=(solana-verify build)
+        if [ -n "${BASE_IMAGE}" ]; then
+          ARGS+=(--base-image "${BASE_IMAGE}")
+        fi
+        ARGS+=(--library-name "${LIBRARY_NAME}")
+        ARGS+=(--)
+        if [ -n "${PACKAGE_NAME}" ]; then
+          ARGS+=(--package "${PACKAGE_NAME}")
+        fi
+        if [ -n "${EXTRA_ARGS}" ]; then
+          # shellcheck disable=SC2206
+          EXTRA=(${EXTRA_ARGS})
+          ARGS+=("${EXTRA[@]}")
+        fi
+
+        echo "+ ${ARGS[*]}"
+        "${ARGS[@]}"
+
+        SOURCE="target/deploy/${LIBRARY_NAME}.so"
+        if [ ! -f "${SOURCE}" ]; then
+          echo "::error::expected build output ${SOURCE} not found"
+          exit 1
+        fi
+
+        BINARY_PATH="${SOURCE}"
+        if [ -n "${OUTPUT_DIR}" ]; then
+          mkdir -p "${OUTPUT_DIR}"
+          DEST="${OUTPUT_DIR%/}/${LIBRARY_NAME}.so"
+          cp "${SOURCE}" "${DEST}"
+          BINARY_PATH="${DEST}"
+        fi
+
+        printf 'binary-path=%s\n' "${BINARY_PATH}" >> "${GITHUB_OUTPUT}"
+      shell: bash

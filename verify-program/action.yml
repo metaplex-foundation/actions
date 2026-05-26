@@ -1,0 +1,549 @@
+name: Verify program
+
+description: |
+  Run one of three `solana-verify` flows for a Solana program against a
+  deployed artifact. The `mode` input selects the flow:
+
+  - `verify-from-repo` (default): upload the verified-build PDA from a keypair
+    on the runner, then optionally notify the OtterSec verifier. Used by direct
+    (single-keypair) deployments such as mpl-hybrid.
+  - `export-pda-tx`: emit the verified-build PDA upload as a base58
+    transaction for a multisig signer (e.g. a Squads vault) to execute. No
+    keypair is required on the runner.
+  - `submit-remote-job`: rebuild the program deterministically, compare the
+    local executable hash to the on-chain program hash, fail if they differ,
+    and optionally notify OtterSec. Used after a multisig executes the
+    `export-pda-tx` transaction.
+
+inputs:
+  mode:
+    description: |
+      Which `solana-verify` flow to run. One of `verify-from-repo`,
+      `export-pda-tx`, or `submit-remote-job`. Defaults to `verify-from-repo`
+      to preserve existing single-keypair callers.
+    required: true
+    default: "verify-from-repo"
+
+  program-id:
+    description: On-chain program ID (pubkey). Either `program-id` or `program-id-keypair` must be provided
+    required: false
+  program-id-keypair:
+    description: Path to the program-id keypair file. Used to derive `program-id` when it is not provided explicitly
+    required: false
+  rpc-url:
+    description: Solana RPC URL the program is deployed to
+    required: true
+  library-name:
+    description: Cargo library name of the program (matches `[lib].name` in Cargo.toml, e.g. `mpl_hybrid`)
+    required: true
+  package:
+    description: Cargo package name forwarded after `--`. Required when the workspace has multiple members that could emit the same library filename
+    required: false
+
+  mount-path:
+    description: |
+      Path inside the repository (relative to the runner working directory) to
+      mount into the verifier container. Defaults to `.`. Use a subdirectory
+      (e.g. `programs/bubblegum`) when the Cargo workspace is nested below
+      the repo root
+    required: true
+    default: "."
+  working-directory:
+    description: Directory to run `solana-verify` from. Defaults to `.`
+    required: true
+    default: "."
+
+  base-image:
+    description: |
+      Docker base image used by `solana-verify`. Must be digest-pinned
+      (`<image>@sha256:<digest>`) so a mutable upstream tag cannot change the
+      hash the verifier computes. Leave empty to use `solana-verify`'s default
+      image. Set `allow-mutable-tag: true` to bypass the format check (not
+      recommended)
+    required: false
+  allow-mutable-tag:
+    description: |
+      Allow `base-image` to use a mutable tag instead of a digest pin.
+      Defaults to `false`
+    required: true
+    default: "false"
+
+  keypair:
+    description: |
+      Path to the uploader keypair used to write the verified-build PDA in
+      `verify-from-repo` mode. Required in that mode and ignored in the
+      others
+    required: false
+  repo-url:
+    description: HTTPS URL of the source repository. Defaults to `https://github.com/${GITHUB_REPOSITORY}.git`. Used by `verify-from-repo` and `export-pda-tx`
+    required: false
+  commit-hash:
+    description: Commit hash that produced the on-chain program. Defaults to `${GITHUB_SHA}`. Used by `verify-from-repo` and `export-pda-tx`
+    required: false
+  init-cli-config:
+    description: |
+      Whether to run `solana config set` before invoking `solana-verify`.
+      solana-verify 0.4.15 unconditionally loads `~/.config/solana/cli/config.yml`
+      during the PDA upload and fails on GitHub runners with `No such file or
+      directory (os error 2)` when the config does not exist
+    required: true
+    default: "true"
+
+  uploader:
+    description: |
+      Pubkey of the verified-build PDA uploader. Required in `export-pda-tx`
+      mode. Required in `submit-remote-job` mode when `submit-remote` resolves
+      to `true`. In `verify-from-repo` mode the action derives this from
+      `keypair`
+    required: false
+  output-file:
+    description: |
+      Path (relative to `working-directory`) to write the base58 PDA-upload
+      transaction to in `export-pda-tx` mode
+    required: true
+    default: "verify-pda-tx.b58"
+  emit-summary:
+    description: |
+      Whether to append a `### Verified-build PDA transaction` block to
+      `$GITHUB_STEP_SUMMARY` in `export-pda-tx` mode
+    required: true
+    default: "true"
+  encoding:
+    description: Encoding passed to `solana-verify export-pda-tx --encoding`
+    required: true
+    default: "base58"
+  compute-unit-price:
+    description: Compute-unit price passed to `solana-verify export-pda-tx --compute-unit-price`
+    required: true
+    default: "0"
+
+  repo-visibility:
+    description: |
+      Visibility of the source repository. Must be `public` or `private`. When
+      `private`, `submit-remote` defaults to `false` because the OtterSec
+      verifier cannot clone a private repo. The on-chain PDA upload (or
+      export) runs regardless
+    required: true
+    default: "public"
+  submit-remote:
+    description: |
+      Whether to submit the remote verification job (`solana-verify remote
+      submit-job`) after the per-mode primary action completes. Leave empty
+      to derive from `repo-visibility` (`public` -> `true`, `private` ->
+      `false`). Ignored in `export-pda-tx` mode (no PDA has been written
+      yet); set to `true`/`false` explicitly to override the derived default
+      in other modes
+    required: false
+    default: ""
+
+outputs:
+  program-id:
+    description: The resolved program ID (pubkey)
+    value: ${{ steps.resolve.outputs.program-id }}
+  uploader:
+    description: The resolved uploader pubkey used for the PDA / remote submit
+    value: ${{ steps.resolve.outputs.uploader }}
+  tx-file:
+    description: Path of the base58 PDA-upload transaction file produced in `export-pda-tx` mode
+    value: ${{ steps.export.outputs.tx-file }}
+  tx:
+    description: Base58 PDA-upload transaction produced in `export-pda-tx` mode
+    value: ${{ steps.export.outputs.tx }}
+  local-hash:
+    description: Local executable hash from the deterministic rebuild in `submit-remote-job` mode
+    value: ${{ steps.compare.outputs.local-hash }}
+  onchain-hash:
+    description: On-chain program hash retrieved in `submit-remote-job` mode
+    value: ${{ steps.compare.outputs.onchain-hash }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Resolve inputs
+      id: resolve
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_PROGRAM_ID: ${{ inputs.program-id }}
+        INPUT_PROGRAM_ID_KEYPAIR: ${{ inputs.program-id-keypair }}
+        INPUT_KEYPAIR: ${{ inputs.keypair }}
+        INPUT_UPLOADER: ${{ inputs.uploader }}
+        INPUT_REPO_URL: ${{ inputs.repo-url }}
+        INPUT_COMMIT_HASH: ${{ inputs.commit-hash }}
+        INPUT_REPO_VISIBILITY: ${{ inputs.repo-visibility }}
+        INPUT_SUBMIT_REMOTE: ${{ inputs.submit-remote }}
+        INPUT_BASE_IMAGE: ${{ inputs.base-image }}
+        INPUT_ALLOW_MUTABLE_TAG: ${{ inputs.allow-mutable-tag }}
+      run: |
+        set -euo pipefail
+
+        case "${INPUT_MODE}" in
+          verify-from-repo|export-pda-tx|submit-remote-job) ;;
+          *)
+            echo "::error::invalid mode '${INPUT_MODE}': expected 'verify-from-repo', 'export-pda-tx', or 'submit-remote-job'"
+            exit 1
+            ;;
+        esac
+
+        # Reject mutable Docker tags by default. A PR-controlled tag (or a
+        # re-pushed upstream tag) can swap the verifier image and silently
+        # produce a hash that no longer matches the on-chain program.
+        if [ -n "${INPUT_BASE_IMAGE}" ] && [[ ! "${INPUT_BASE_IMAGE}" =~ ^[^@[:space:]]+@sha256:[a-f0-9]{64}$ ]]; then
+          if [ "${INPUT_ALLOW_MUTABLE_TAG}" = "true" ]; then
+            echo "::warning::base-image '${INPUT_BASE_IMAGE}' is not digest-pinned (allow-mutable-tag=true). Verification may drift from the on-chain hash."
+          else
+            echo "::error::base-image '${INPUT_BASE_IMAGE}' must be digest-pinned (e.g. <image>@sha256:<digest>). Pass allow-mutable-tag: true to bypass."
+            exit 1
+          fi
+        fi
+
+        PROGRAM_ID="${INPUT_PROGRAM_ID}"
+        if [ -z "${PROGRAM_ID}" ]; then
+          if [ -z "${INPUT_PROGRAM_ID_KEYPAIR}" ]; then
+            echo "::error::either 'program-id' or 'program-id-keypair' must be provided"
+            exit 1
+          fi
+          if [ ! -f "${INPUT_PROGRAM_ID_KEYPAIR}" ]; then
+            echo "::error::program-id-keypair file not found: ${INPUT_PROGRAM_ID_KEYPAIR}"
+            exit 1
+          fi
+          PROGRAM_ID="$(solana-keygen pubkey "${INPUT_PROGRAM_ID_KEYPAIR}")"
+        fi
+
+        KEYPAIR_ABS=""
+        if [ -n "${INPUT_KEYPAIR}" ]; then
+          if [ ! -f "${INPUT_KEYPAIR}" ]; then
+            echo "::error::keypair file not found: ${INPUT_KEYPAIR}"
+            exit 1
+          fi
+          if [[ "${INPUT_KEYPAIR}" = /* ]]; then
+            KEYPAIR_ABS="${INPUT_KEYPAIR}"
+          else
+            KEYPAIR_ABS="$(pwd)/${INPUT_KEYPAIR}"
+          fi
+        fi
+
+        # Mode-specific required inputs.
+        case "${INPUT_MODE}" in
+          verify-from-repo)
+            if [ -z "${KEYPAIR_ABS}" ]; then
+              echo "::error::mode 'verify-from-repo' requires 'keypair'"
+              exit 1
+            fi
+            ;;
+          export-pda-tx)
+            if [ -z "${INPUT_UPLOADER}" ]; then
+              echo "::error::mode 'export-pda-tx' requires 'uploader' (pubkey of the multisig / vault that will execute the PDA upload)"
+              exit 1
+            fi
+            ;;
+          submit-remote-job) ;;
+        esac
+
+        # Resolve the uploader: explicit input wins, otherwise derive from the
+        # keypair pubkey (only meaningful in verify-from-repo mode).
+        UPLOADER="${INPUT_UPLOADER}"
+        if [ -z "${UPLOADER}" ] && [ -n "${KEYPAIR_ABS}" ]; then
+          UPLOADER="$(solana-keygen pubkey "${KEYPAIR_ABS}")"
+        fi
+        if [ -n "${UPLOADER}" ] && [[ ! "${UPLOADER}" =~ ^[1-9A-HJ-NP-Za-km-z]{32,44}$ ]]; then
+          echo "::error::uploader '${UPLOADER}' does not look like a base58-encoded Solana pubkey"
+          exit 1
+        fi
+
+        REPO_URL="${INPUT_REPO_URL}"
+        if [ -z "${REPO_URL}" ]; then
+          REPO_URL="https://github.com/${GITHUB_REPOSITORY}.git"
+        fi
+
+        COMMIT_HASH="${INPUT_COMMIT_HASH}"
+        if [ -z "${COMMIT_HASH}" ]; then
+          COMMIT_HASH="${GITHUB_SHA}"
+        fi
+
+        case "${INPUT_REPO_VISIBILITY}" in
+          public|private) ;;
+          *)
+            echo "::error::invalid repo-visibility '${INPUT_REPO_VISIBILITY}': expected 'public' or 'private'"
+            exit 1
+            ;;
+        esac
+
+        # Resolve effective submit-remote.
+        # - In export-pda-tx mode the PDA has not been uploaded yet, so a
+        #   remote submit would be premature and is forced off.
+        # - In other modes, explicit `true`/`false` wins. An empty value derives
+        #   from `repo-visibility` (public -> true, private -> false).
+        SUBMIT_REMOTE="${INPUT_SUBMIT_REMOTE}"
+        case "${SUBMIT_REMOTE}" in
+          true|false|"") ;;
+          *)
+            echo "::error::invalid submit-remote '${SUBMIT_REMOTE}': expected 'true', 'false', or empty"
+            exit 1
+            ;;
+        esac
+        if [ "${INPUT_MODE}" = "export-pda-tx" ]; then
+          if [ "${SUBMIT_REMOTE}" = "true" ]; then
+            echo "::error::submit-remote='true' is not valid with mode='export-pda-tx': the PDA has not been uploaded yet, run the action again with mode='submit-remote-job' after the multisig executes the transaction"
+            exit 1
+          fi
+          SUBMIT_REMOTE="false"
+        elif [ -z "${SUBMIT_REMOTE}" ]; then
+          if [ "${INPUT_REPO_VISIBILITY}" = "private" ]; then
+            SUBMIT_REMOTE="false"
+          else
+            SUBMIT_REMOTE="true"
+          fi
+        fi
+
+        if [ "${SUBMIT_REMOTE}" = "true" ] && [ -z "${UPLOADER}" ]; then
+          echo "::error::submit-remote='true' requires 'uploader' (or a 'keypair' to derive it from)"
+          exit 1
+        fi
+
+        printf 'mode=%s\n'           "${INPUT_MODE}"     >> "${GITHUB_OUTPUT}"
+        printf 'program-id=%s\n'     "${PROGRAM_ID}"     >> "${GITHUB_OUTPUT}"
+        printf 'keypair-abs=%s\n'    "${KEYPAIR_ABS}"    >> "${GITHUB_OUTPUT}"
+        printf 'uploader=%s\n'       "${UPLOADER}"       >> "${GITHUB_OUTPUT}"
+        printf 'repo-url=%s\n'       "${REPO_URL}"       >> "${GITHUB_OUTPUT}"
+        printf 'commit-hash=%s\n'    "${COMMIT_HASH}"    >> "${GITHUB_OUTPUT}"
+        printf 'submit-remote=%s\n'  "${SUBMIT_REMOTE}"  >> "${GITHUB_OUTPUT}"
+      shell: bash
+
+    # solana-verify 0.4.15 unconditionally loads ~/.config/solana/cli/config.yml
+    # during the PDA upload (process_otter_verify_ixs in
+    # Ellipsis-Labs/solana-verifiable-build), so seed the CLI config even
+    # though --keypair and --url are passed explicitly below. The other modes
+    # (export-pda-tx, submit-remote-job) also benefit from a populated config
+    # so subsequent `solana ...` calls behave predictably.
+    - name: Initialize Solana CLI config
+      if: inputs.init-cli-config == 'true'
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        RPC_URL: ${{ inputs.rpc-url }}
+        KEYPAIR_ABS: ${{ steps.resolve.outputs.keypair-abs }}
+      run: |
+        set -euo pipefail
+        ARGS=(solana config set --url "${RPC_URL}")
+        if [ -n "${KEYPAIR_ABS}" ]; then
+          ARGS+=(--keypair "${KEYPAIR_ABS}")
+        fi
+        "${ARGS[@]}"
+      shell: bash
+
+    - name: Upload verified-build PDA
+      if: inputs.mode == 'verify-from-repo'
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        PROGRAM_ID: ${{ steps.resolve.outputs.program-id }}
+        RPC_URL: ${{ inputs.rpc-url }}
+        KEYPAIR: ${{ inputs.keypair }}
+        REPO_URL: ${{ steps.resolve.outputs.repo-url }}
+        COMMIT_HASH: ${{ steps.resolve.outputs.commit-hash }}
+        LIBRARY_NAME: ${{ inputs.library-name }}
+        PACKAGE_NAME: ${{ inputs.package }}
+        MOUNT_PATH: ${{ inputs.mount-path }}
+        BASE_IMAGE: ${{ inputs.base-image }}
+      run: |
+        set -euo pipefail
+
+        ARGS=(
+          solana-verify verify-from-repo
+          --current-dir
+          --program-id "${PROGRAM_ID}"
+          --url "${RPC_URL}"
+          --keypair "${KEYPAIR}"
+          --library-name "${LIBRARY_NAME}"
+          --mount-path "${MOUNT_PATH}"
+          --commit-hash "${COMMIT_HASH}"
+          --skip-prompt
+        )
+        if [ -n "${BASE_IMAGE}" ]; then
+          ARGS+=(--base-image "${BASE_IMAGE}")
+        fi
+        ARGS+=("${REPO_URL}")
+        if [ -n "${PACKAGE_NAME}" ]; then
+          ARGS+=(-- --package "${PACKAGE_NAME}")
+        fi
+
+        echo "+ ${ARGS[*]}"
+        "${ARGS[@]}"
+      shell: bash
+
+    - name: Export verified-build PDA transaction
+      id: export
+      if: inputs.mode == 'export-pda-tx'
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        PROGRAM_ID: ${{ steps.resolve.outputs.program-id }}
+        RPC_URL: ${{ inputs.rpc-url }}
+        UPLOADER: ${{ steps.resolve.outputs.uploader }}
+        REPO_URL: ${{ steps.resolve.outputs.repo-url }}
+        COMMIT_HASH: ${{ steps.resolve.outputs.commit-hash }}
+        LIBRARY_NAME: ${{ inputs.library-name }}
+        PACKAGE_NAME: ${{ inputs.package }}
+        MOUNT_PATH: ${{ inputs.mount-path }}
+        BASE_IMAGE: ${{ inputs.base-image }}
+        OUTPUT_FILE: ${{ inputs.output-file }}
+        EMIT_SUMMARY: ${{ inputs.emit-summary }}
+        ENCODING: ${{ inputs.encoding }}
+        COMPUTE_UNIT_PRICE: ${{ inputs.compute-unit-price }}
+      run: |
+        set -euo pipefail
+
+        OUTPUT_DIR="$(dirname "${OUTPUT_FILE}")"
+        if [ -n "${OUTPUT_DIR}" ] && [ "${OUTPUT_DIR}" != "." ]; then
+          mkdir -p "${OUTPUT_DIR}"
+        fi
+
+        ARGS=(
+          solana-verify export-pda-tx
+          --url "${RPC_URL}"
+          --program-id "${PROGRAM_ID}"
+          --uploader "${UPLOADER}"
+          --encoding "${ENCODING}"
+          --compute-unit-price "${COMPUTE_UNIT_PRICE}"
+          --library-name "${LIBRARY_NAME}"
+          --mount-path "${MOUNT_PATH}"
+          --commit-hash "${COMMIT_HASH}"
+        )
+        if [ -n "${BASE_IMAGE}" ]; then
+          ARGS+=(--base-image "${BASE_IMAGE}")
+        fi
+        ARGS+=("${REPO_URL}")
+        if [ -n "${PACKAGE_NAME}" ]; then
+          ARGS+=(-- --package "${PACKAGE_NAME}")
+        fi
+
+        RAW_OUT="$(mktemp)"
+        trap 'rm -f "${RAW_OUT}"' EXIT
+
+        echo "+ ${ARGS[*]}"
+        "${ARGS[@]}" > "${RAW_OUT}"
+
+        # solana-verify mixes docker progress lines and other status output
+        # with the encoded transaction on stdout. The serialized Solana
+        # transaction is the longest pure base58 line (>= 100 chars); pick
+        # that one to avoid picking up shorter base58-looking strings such as
+        # pubkeys or layer IDs.
+        TX_LINE=$(grep -E '^[1-9A-HJ-NP-Za-km-z]{100,}$' "${RAW_OUT}" \
+                  | awk '{ print length, $0 }' \
+                  | sort -n \
+                  | tail -n 1 \
+                  | cut -d' ' -f2-)
+
+        if [ -z "${TX_LINE}" ]; then
+          echo "::error title=Verified-build PDA export::Could not extract a base58 transaction from solana-verify output. Raw stdout follows:"
+          cat "${RAW_OUT}" >&2
+          exit 1
+        fi
+
+        printf '%s\n' "${TX_LINE}" > "${OUTPUT_FILE}"
+
+        if [ "${EMIT_SUMMARY}" = "true" ] && [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+          {
+            echo "### Verified-build PDA transaction"
+            echo ""
+            echo "Submit this base58 transaction through the uploader (\`${UPLOADER}\`)."
+            echo "The PDA is only authoritative for explorers when the uploader equals the program upgrade authority."
+            echo ""
+            echo '```'
+            cat "${OUTPUT_FILE}"
+            echo '```'
+            echo ""
+            echo "After it executes on-chain, re-run this action with \`mode: submit-remote-job\` to verify the hash and (optionally) notify OtterSec."
+          } >> "${GITHUB_STEP_SUMMARY}"
+        fi
+
+        printf 'tx-file=%s\n' "${OUTPUT_FILE}" >> "${GITHUB_OUTPUT}"
+        printf 'tx=%s\n'      "${TX_LINE}"    >> "${GITHUB_OUTPUT}"
+      shell: bash
+
+    - name: Rebuild program for hash comparison
+      if: inputs.mode == 'submit-remote-job'
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        LIBRARY_NAME: ${{ inputs.library-name }}
+        PACKAGE_NAME: ${{ inputs.package }}
+        MOUNT_PATH: ${{ inputs.mount-path }}
+        BASE_IMAGE: ${{ inputs.base-image }}
+      run: |
+        set -euo pipefail
+
+        WORKSPACE="${MOUNT_PATH%/}"
+        if [ -z "${WORKSPACE}" ]; then
+          WORKSPACE="."
+        fi
+        if [ ! -d "${WORKSPACE}" ]; then
+          echo "::error::workspace directory '${WORKSPACE}' not found relative to working-directory '$(pwd)'"
+          exit 1
+        fi
+
+        ARGS=(solana-verify build)
+        if [ -n "${BASE_IMAGE}" ]; then
+          ARGS+=(--base-image "${BASE_IMAGE}")
+        fi
+        ARGS+=(--library-name "${LIBRARY_NAME}")
+        ARGS+=(--)
+        if [ -n "${PACKAGE_NAME}" ]; then
+          ARGS+=(--package "${PACKAGE_NAME}")
+        fi
+
+        (
+          cd "${WORKSPACE}"
+          echo "+ (cd ${WORKSPACE} && ${ARGS[*]})"
+          "${ARGS[@]}"
+        )
+      shell: bash
+
+    - name: Compare local and on-chain hashes
+      id: compare
+      if: inputs.mode == 'submit-remote-job'
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        PROGRAM_ID: ${{ steps.resolve.outputs.program-id }}
+        RPC_URL: ${{ inputs.rpc-url }}
+        LIBRARY_NAME: ${{ inputs.library-name }}
+        MOUNT_PATH: ${{ inputs.mount-path }}
+      run: |
+        set -euo pipefail
+
+        WORKSPACE="${MOUNT_PATH%/}"
+        if [ -z "${WORKSPACE}" ]; then
+          WORKSPACE="."
+        fi
+        SO_PATH="${WORKSPACE}/target/deploy/${LIBRARY_NAME}.so"
+        if [ ! -f "${SO_PATH}" ]; then
+          echo "::error::expected build output ${SO_PATH} not found. Did the rebuild step run?"
+          exit 1
+        fi
+
+        LOCAL_HASH=$(solana-verify get-executable-hash "${SO_PATH}")
+        ONCHAIN_HASH=$(solana-verify get-program-hash --url "${RPC_URL}" "${PROGRAM_ID}")
+
+        echo "Local build hash:    ${LOCAL_HASH}"
+        echo "On-chain executable: ${ONCHAIN_HASH}"
+
+        if [ "${LOCAL_HASH}" != "${ONCHAIN_HASH}" ]; then
+          echo "::error title=Verified-build hash mismatch::Local build hash (${LOCAL_HASH}) does not match the on-chain program (${ONCHAIN_HASH}). Refusing to submit the remote verification job."
+          exit 1
+        fi
+
+        printf 'local-hash=%s\n'   "${LOCAL_HASH}"   >> "${GITHUB_OUTPUT}"
+        printf 'onchain-hash=%s\n' "${ONCHAIN_HASH}" >> "${GITHUB_OUTPUT}"
+      shell: bash
+
+    - name: Submit remote verification job
+      if: steps.resolve.outputs.submit-remote == 'true'
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        PROGRAM_ID: ${{ steps.resolve.outputs.program-id }}
+        UPLOADER: ${{ steps.resolve.outputs.uploader }}
+        RPC_URL: ${{ inputs.rpc-url }}
+      run: |
+        set -euo pipefail
+        solana-verify remote submit-job \
+          --url "${RPC_URL}" \
+          --program-id "${PROGRAM_ID}" \
+          --uploader "${UPLOADER}"
+      shell: bash
