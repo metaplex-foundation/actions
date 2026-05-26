@@ -36,7 +36,7 @@ Run one of three [`solana-verify`](https://github.com/Ellipsis-Labs/solana-verif
     rpc-url: ${{ secrets.MAINNET_RPC }}
     library-name: mpl_hybrid
     package: mpl-hybrid-program
-    base-image: solanafoundation/solana-verifiable-build@sha256:ec2e20e1f80607150a71e4c72adfe64be24347ed0b4fb741c32b34eaf7549a25
+    solana-version: 1.18.26
 ```
 
 ## Mode: `export-pda-tx` (Squads / multisig — phase 1)
@@ -53,7 +53,7 @@ Run during the deploy. Generates the base58 PDA-upload transaction for the multi
     library-name: bubblegum
     package: bubblegum
     mount-path: programs/bubblegum
-    base-image: solanafoundation/solana-verifiable-build@sha256:ec2e20e1f80607150a71e4c72adfe64be24347ed0b4fb741c32b34eaf7549a25
+    solana-version: 1.18.26
     output-file: verify-pda-tx.b58
 
 - uses: actions/upload-artifact@v4
@@ -79,7 +79,7 @@ Run after the multisig executes the transaction from phase 1. Rebuilds the progr
     library-name: bubblegum
     package: bubblegum
     mount-path: programs/bubblegum
-    base-image: solanafoundation/solana-verifiable-build@sha256:ec2e20e1f80607150a71e4c72adfe64be24347ed0b4fb741c32b34eaf7549a25
+    solana-version: 1.18.26
     submit-remote: true
 ```
 
@@ -99,9 +99,6 @@ on:
         required: true
         default: submit-remote-job
         options: [export-pda-tx, submit-remote-job]
-
-env:
-  SOLANA_VERIFY_BASE_IMAGE: solanafoundation/solana-verifiable-build@sha256:ec2e20e1f80607150a71e4c72adfe64be24347ed0b4fb741c32b34eaf7549a25
 
 jobs:
   verify:
@@ -124,7 +121,7 @@ jobs:
           library-name: bubblegum
           package: bubblegum
           mount-path: programs/bubblegum
-          base-image: ${{ env.SOLANA_VERIFY_BASE_IMAGE }}
+          solana-version: 1.18.26
           submit-remote: true
 
       - if: inputs.mode == 'export-pda-tx'
@@ -150,7 +147,8 @@ Inputs are organized by which mode(s) they apply to. The mode is validated in th
 | `package` | no | — | Cargo package name forwarded after `--`. Required when the workspace has multiple members that emit the same library filename. |
 | `mount-path` | yes | `.` | Path inside the repo to mount into the verifier container. Use e.g. `programs/bubblegum` when the Cargo workspace is nested. |
 | `working-directory` | yes | `.` | Directory `solana-verify` runs from. |
-| `base-image` | no | `solana-verify`'s default | Must be digest-pinned (`<image>@sha256:<64 hex>`). Set `allow-mutable-tag: true` to bypass. |
+| `solana-version` | no | — | Solana version that produced the on-chain program. Resolved against [`solana-verify-base-images.json`](../solana-verify-base-images.json) to a digest-pinned image. Use this for any version present in the table; otherwise pass `base-image`. |
+| `base-image` | no | derived from `solana-version` if set, else `solana-verify`'s default | Direct digest-pinned image. Takes precedence over `solana-version`. Must match `<image>@sha256:<64 hex>` unless `allow-mutable-tag: true`. |
 | `allow-mutable-tag` | yes | `false` | Allow a mutable tag for `base-image` (not recommended). |
 | `init-cli-config` | yes | `true` | Whether to run `solana config set` before `solana-verify`. Required for `solana-verify 0.4.15`'s PDA upload path. |
 
@@ -193,6 +191,7 @@ Inputs are organized by which mode(s) they apply to. The mode is validated in th
 |---|---|---|
 | `program-id` | all | Resolved program ID (pubkey). |
 | `uploader` | all | Resolved uploader pubkey. Useful when the action derived it from `keypair`. |
+| `base-image` | all | Resolved digest-pinned base image (from `base-image` input or `solana-version` lookup). Empty when neither was set. |
 | `tx-file` | `export-pda-tx` | Path of the base58 PDA-upload transaction file. |
 | `tx` | `export-pda-tx` | The base58 PDA-upload transaction itself, suitable for piping into downstream steps. |
 | `local-hash` | `submit-remote-job` | Local executable hash from the deterministic rebuild. |
@@ -206,27 +205,24 @@ When `repo-visibility: private`, `submit-remote` defaults to `false` because the
 
 The action requires `base-image` to be digest-pinned because a mutable tag like `:1.18.26` can be re-pushed by the registry owner, which would silently change the verifier's hash and either falsely match or falsely diverge from the on-chain program. The deploy job that uploads the verified-build PDA runs with the deployer keypair on disk, so a swapped image is also a foothold for a supply-chain attacker — see [mpl-hybrid PR #26](https://github.com/metaplex-foundation/mpl-hybrid/pull/26) for the audit finding that originated this pattern.
 
-Find the current digest for an image with:
+For callers on a Solana version listed in [`solana-verify-base-images.json`](../solana-verify-base-images.json), the simplest pattern is `solana-version: <X.Y.Z>` and let the action pick the right digest. For other versions or to override the lookup, find the digest with:
 
 ```bash
-docker buildx imagetools inspect solanafoundation/solana-verifiable-build:1.18.26 \
+docker buildx imagetools inspect solanafoundation/solana-verifiable-build:1.18.30 \
   --format '{{ .Manifest.Digest }}'
 ```
 
-Hard-code the result in the caller workflow's `env:` block — **not** in `.github/.env`, since any PR can edit that file and swap the image:
-
-```yaml
-env:
-  SOLANA_VERIFY_BASE_IMAGE: solanafoundation/solana-verifiable-build@sha256:ec2e20e1f80607150a71e4c72adfe64be24347ed0b4fb741c32b34eaf7549a25
-```
-
-If the workflow also grep-loads `.github/.env` into `$GITHUB_ENV`, exclude `SOLANA_VERIFY_BASE_IMAGE` from the allowlist so a re-introduced entry cannot override the workflow-level pin (`$GITHUB_ENV` wins over `env:` for subsequent steps):
+and pass `base-image` directly. Hard-code that value in the caller workflow's `env:` block — **not** in `.github/.env`, since any PR can edit that file and swap the image. If the workflow grep-loads `.github/.env` into `$GITHUB_ENV`, exclude any image-related key from the allowlist:
 
 ```yaml
 - run: |
     grep -E '^(RUST_VERSION|DEPLOY_SOLANA_VERSION|SOLANA_VERIFY_VERSION)=' \
       .github/.env >> "$GITHUB_ENV"
 ```
+
+### Adding a new Solana version to the lookup
+
+Update [`solana-verify-base-images.json`](../solana-verify-base-images.json) with the digest from `docker buildx imagetools inspect`. The action's resolution error message lists the currently known versions, so an actionable failure is the signal to add an entry.
 
 ## Notes
 
