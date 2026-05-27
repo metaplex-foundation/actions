@@ -1,6 +1,7 @@
 {
   "$comment": "Maps Solana versions to digest-pinned solana-verifiable-build images. Consumed by the verified-build and verify-program composite actions when a caller passes `solana-version` without an explicit `base-image`. Adding a new entry requires verifying the digest against the official solanafoundation/solana-verifiable-build registry: `docker buildx imagetools inspect solanafoundation/solana-verifiable-build:<TAG> --format '{{ .Manifest.Digest }}'`. Keep this file sorted by Solana version (newest first).",
   "images": {
-    "1.18.26": "solanafoundation/solana-verifiable-build@sha256:ec2e20e1f80607150a71e4c72adfe64be24347ed0b4fb741c32b34eaf7549a25"
+    "1.18.26": "solanafoundation/solana-verifiable-build@sha256:ec2e20e1f80607150a71e4c72adfe64be24347ed0b4fb741c32b34eaf7549a25",
+    "1.18.22": "solanafoundation/solana-verifiable-build@sha256:7804e1076ef24d4840f4fec24c88b5be8008e947cad2705516666a9f24b39de3"
   }
 }
