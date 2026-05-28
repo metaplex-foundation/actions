@@ -130,7 +130,9 @@ inputs:
       Visibility of the source repository. Must be `public` or `private`. When
       `private`, `submit-remote` defaults to `false` because the OtterSec
       verifier cannot clone a private repo. The on-chain PDA upload (or
-      export) runs regardless
+      export) runs regardless. Auto-promoted to `private` when
+      `github.event.repository.private == true` so same-repo private callers
+      do not have to set this explicitly
     required: true
     default: "public"
   submit-remote:
@@ -182,6 +184,7 @@ runs:
         INPUT_REPO_URL: ${{ inputs.repo-url }}
         INPUT_COMMIT_HASH: ${{ inputs.commit-hash }}
         INPUT_REPO_VISIBILITY: ${{ inputs.repo-visibility }}
+        GITHUB_REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
         INPUT_SUBMIT_REMOTE: ${{ inputs.submit-remote }}
         INPUT_SOLANA_VERSION: ${{ inputs.solana-version }}
         INPUT_BASE_IMAGE: ${{ inputs.base-image }}
@@ -299,6 +302,16 @@ runs:
             ;;
         esac
 
+        # Auto-promote same-repo private workflows so callers do not have to
+        # set repo-visibility explicitly for the common private-repo case.
+        # Keep explicit repo-url values governed by the caller's input; this
+        # action does not support cross-repo private clone credentials.
+        REPO_VISIBILITY="${INPUT_REPO_VISIBILITY}"
+        DEFAULT_REPO_URL="https://github.com/${GITHUB_REPOSITORY}.git"
+        if [ "${GITHUB_REPOSITORY_PRIVATE}" = "true" ] && [ "${REPO_URL}" = "${DEFAULT_REPO_URL}" ]; then
+          REPO_VISIBILITY="private"
+        fi
+
         # Resolve effective submit-remote.
         # - In export-pda-tx mode the PDA has not been uploaded yet, so a
         #   remote submit would be premature and is forced off.
@@ -319,7 +332,7 @@ runs:
           fi
           SUBMIT_REMOTE="false"
         elif [ -z "${SUBMIT_REMOTE}" ]; then
-          if [ "${INPUT_REPO_VISIBILITY}" = "private" ]; then
+          if [ "${REPO_VISIBILITY}" = "private" ]; then
             SUBMIT_REMOTE="false"
           else
             SUBMIT_REMOTE="true"
@@ -339,6 +352,7 @@ runs:
         printf 'commit-hash=%s\n'    "${COMMIT_HASH}"    >> "${GITHUB_OUTPUT}"
         printf 'submit-remote=%s\n'  "${SUBMIT_REMOTE}"  >> "${GITHUB_OUTPUT}"
         printf 'base-image=%s\n'     "${BASE_IMAGE}"     >> "${GITHUB_OUTPUT}"
+        printf 'repo-visibility=%s\n' "${REPO_VISIBILITY}" >> "${GITHUB_OUTPUT}"
       shell: bash
 
     # solana-verify 0.4.15 unconditionally loads ~/.config/solana/cli/config.yml
@@ -375,6 +389,8 @@ runs:
         PACKAGE_NAME: ${{ inputs.package }}
         MOUNT_PATH: ${{ inputs.mount-path }}
         BASE_IMAGE: ${{ steps.resolve.outputs.base-image }}
+        REPO_VISIBILITY: ${{ steps.resolve.outputs.repo-visibility }}
+        GITHUB_TOKEN: ${{ steps.resolve.outputs.repo-visibility == 'private' && github.token || '' }}
       run: |
         set -euo pipefail
 
@@ -398,7 +414,20 @@ runs:
         fi
 
         echo "+ ${ARGS[*]}"
-        "${ARGS[@]}"
+        if [ "${REPO_VISIBILITY}" = "private" ]; then
+          if [ -z "${GITHUB_TOKEN}" ]; then
+            echo "::error::repo-visibility resolved to private, but github.token is unavailable for authenticated git clone"
+            exit 1
+          fi
+          AUTH_CONFIG=$(mktemp)
+          trap 'rm -f "${AUTH_CONFIG}"' EXIT
+          git config --file "${AUTH_CONFIG}" \
+            "url.https://x-access-token:${GITHUB_TOKEN}@github.com/.insteadOf" \
+            "https://github.com/"
+          GIT_CONFIG_GLOBAL="${AUTH_CONFIG}" "${ARGS[@]}"
+        else
+          "${ARGS[@]}"
+        fi
       shell: bash
 
     - name: Export verified-build PDA transaction
@@ -419,6 +448,8 @@ runs:
         EMIT_SUMMARY: ${{ inputs.emit-summary }}
         ENCODING: ${{ inputs.encoding }}
         COMPUTE_UNIT_PRICE: ${{ inputs.compute-unit-price }}
+        REPO_VISIBILITY: ${{ steps.resolve.outputs.repo-visibility }}
+        GITHUB_TOKEN: ${{ steps.resolve.outputs.repo-visibility == 'private' && github.token || '' }}
       run: |
         set -euo pipefail
 
@@ -450,7 +481,25 @@ runs:
         trap 'rm -f "${RAW_OUT}"' EXIT
 
         echo "+ ${ARGS[*]}"
-        "${ARGS[@]}" > "${RAW_OUT}"
+        # `solana-verify export-pda-tx` performs an internal `git clone` of
+        # `${REPO_URL}` even though the build runs from the local checkout. For
+        # private repos, scope an authenticated git config to this single
+        # invocation via GIT_CONFIG_GLOBAL so the clone succeeds without
+        # writing the token to the runner's global git config.
+        if [ "${REPO_VISIBILITY}" = "private" ]; then
+          if [ -z "${GITHUB_TOKEN}" ]; then
+            echo "::error::repo-visibility resolved to private, but github.token is unavailable for authenticated git clone"
+            exit 1
+          fi
+          AUTH_CONFIG=$(mktemp)
+          trap 'rm -f "${RAW_OUT}" "${AUTH_CONFIG}"' EXIT
+          git config --file "${AUTH_CONFIG}" \
+            "url.https://x-access-token:${GITHUB_TOKEN}@github.com/.insteadOf" \
+            "https://github.com/"
+          GIT_CONFIG_GLOBAL="${AUTH_CONFIG}" "${ARGS[@]}" > "${RAW_OUT}"
+        else
+          "${ARGS[@]}" > "${RAW_OUT}"
+        fi
 
         # solana-verify mixes docker progress lines and other status output
         # with the encoded transaction on stdout. The serialized Solana

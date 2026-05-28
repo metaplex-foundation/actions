@@ -182,7 +182,7 @@ Inputs are organized by which mode(s) they apply to. The mode is validated in th
 
 | Input | Required | Default | Notes |
 |---|---|---|---|
-| `repo-visibility` | yes | `public` | `public` or `private`. Drives the default of `submit-remote`. |
+| `repo-visibility` | yes | `public` | `public` or `private`. Drives the default of `submit-remote`. Auto-promoted to `private` when `github.event.repository.private == true` and `repo-url` resolves to the workflow repository. |
 | `submit-remote` | no | derived from `repo-visibility` (`public` → `true`, `private` → `false`) | Explicit `true`/`false` overrides. Setting `true` in `export-pda-tx` mode is rejected — the PDA has not been written on-chain yet, so re-run with `mode: submit-remote-job` after the multisig executes. |
 
 ## Outputs
@@ -200,6 +200,8 @@ Inputs are organized by which mode(s) they apply to. The mode is validated in th
 ## Private repositories
 
 When `repo-visibility: private`, `submit-remote` defaults to `false` because the OtterSec verifier has no way to clone a private repo. The on-chain side effects of each mode (PDA upload in `verify-from-repo`, transaction generation in `export-pda-tx`, hash compare in `submit-remote-job`) still run, so anyone with repo access can verify locally with `solana-verify verify-from-repo`. Override with `submit-remote: true` if your setup has a private-aware verifier.
+
+For `verify-from-repo` and `export-pda-tx` modes, private repos need one extra piece: `solana-verify` performs an internal `git clone` of the repository URL before building/exporting. When the effective repository visibility is private, this action scopes a temporary git URL rewrite to that single `solana-verify` invocation via `GIT_CONFIG_GLOBAL` and authenticates the clone with the workflow's `github.token`. The token is not written to the runner's global git config and the temporary config is deleted when the step exits. The action auto-promotes `repo-visibility` to `private` only when `github.event.repository.private == true` and `repo-url` resolves to the workflow repository, so same-repo private callers do not have to set the flag manually. The calling job must declare `permissions: contents: read` (or higher) so `github.token` can authenticate the clone.
 
 ## Pinning the base image
 
