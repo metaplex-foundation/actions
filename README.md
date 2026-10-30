@@ -46,6 +46,8 @@ The reference caller lives in
 
 ### programs.json
 
+`deploy-program` and `verify-program` read `programs.json` from the revision the workflow was dispatched from (`github.sha`), not from `git_ref`, so older release tags deploy with today's cluster configuration. `.github/.env` is still read from `git_ref`, because toolchain pins belong with the code they build.
+
 ```json
 {
   "programs": [

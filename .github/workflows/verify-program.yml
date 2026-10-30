@@ -74,6 +74,19 @@ jobs:
           path: .mpl-actions
           persist-credentials: false
 
+      - name: Checkout program descriptors
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Deploy targets come from the revision this workflow was dispatched
+          # from, not from git_ref: a release tag cut before programs.json
+          # existed, or before a cluster was added to it, must still work.
+          # Toolchain pins (.github/.env) still come from git_ref, with the code.
+          ref: ${{ github.sha }}
+          sparse-checkout: .github/programs.json
+          sparse-checkout-cone-mode: false
+          path: .mpl-caller
+          persist-credentials: false
+
       - name: Load environment variables
         uses: ./.mpl-actions/load-env
 
@@ -82,6 +95,7 @@ jobs:
         uses: ./.mpl-actions/program-info
         with:
           name: ${{ inputs.program }}
+          file: .mpl-caller/.github/programs.json
 
       - name: Resolve verification
         id: plan

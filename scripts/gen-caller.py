@@ -126,8 +126,11 @@ def gen_main():
         out.append(f"    branches: {pr}")
     out += ["", "permissions: {}", "", "jobs:"]
     out.append(job("changes", "Detect changes", "detect-changes", perms=["contents: read", "pull-requests: read"]))
+    # Clients are generated and tested against the built programs, so a client
+    # change rebuilds them; a repo without clients only builds on program changes.
+    build_filter = s.get("build_programs_filter", "any")
     out.append(job("build_programs", "Programs", "build-programs", needs="changes",
-                   cond="needs.changes.outputs.any == 'true'", perms=["contents: read"],
+                   cond=f"needs.changes.outputs.{build_filter} == 'true'", perms=["contents: read"],
                    with_pairs=[("apt_packages", s.get("build_apt_packages", "")),
                                ("runner", s.get("runners", {}).get("build_programs", ""))]))
     out.append(job("test_programs", "Programs", "test-programs", needs="changes",
@@ -141,10 +144,11 @@ def gen_main():
                        with_pairs=[("program_matrix", "${{ needs.changes.outputs.program_matrix }}"),
                                    ("apt_packages", s.get("apt_packages", "")),
                                    ("pre_command", cov.get("pre_command", ""))]))
-    out.append(job("generate_clients", "Generate clients", "generate-clients", needs=["changes", "build_programs"],
-                   cond="needs.changes.outputs.any == 'true'", perms=["contents: read"],
-                   with_pairs=[("install_anchor", "true" if s.get("install_anchor") else ""),
-                               ("runner", s.get("runners", {}).get("generate_clients", ""))]))
+    if s.get("generate_clients", True):
+        out.append(job("generate_clients", "Generate clients", "generate-clients", needs=["changes", "build_programs"],
+                       cond="needs.changes.outputs.any == 'true'", perms=["contents: read"],
+                       with_pairs=[("install_anchor", "true" if s.get("install_anchor") else ""),
+                                   ("runner", s.get("runners", {}).get("generate_clients", ""))]))
     if s.get("js_client", True):
         out.append(job("test_js", "JS Client", "test-js-client", needs=["changes", "generate_clients"],
                        cond="needs.changes.outputs.js_client == 'true'", perms=["contents: read"],
@@ -166,25 +170,66 @@ def gen_main():
     return "\n".join(out).rstrip("\n") + "\n"
 
 
-CHECK_TAG = """  check_tag:
-    name: Check tag
-    runs-on: ubuntu-latest
-    permissions: {}
-    outputs:
-      type: ${{ steps.set_type.outputs.type }}
-    steps:
-      - name: Check tag
-        id: set_type
-        env:
-          GIT_REF: ${{ inputs.git_ref }}
-        run: |
-          # %s
-          if [[ "$GIT_REF" == release/*@* ]]; then
-            echo "type=release" >> "$GITHUB_OUTPUT"
-          else
-            echo "type=ref" >> "$GITHUB_OUTPUT"
-          fi
-"""
+def release_tags():
+    """{program name: release tag prefix}, mirroring program-info's default."""
+    return {p["name"]: p.get("release_tag", p["name"]) for p in SPEC["programs"]}
+
+
+def check_tag(comment, per_program):
+    """The check_tag job: classifies git_ref as `release` or `ref`.
+
+    Only this repository's own release tags count as `release`; any other
+    release/*@* ref is an error rather than a reason to skip build and test.
+    With `per_program` the tag must also belong to the selected program."""
+    tags = release_tags()
+    head = [
+        "  check_tag:",
+        "    name: Check tag",
+        "    runs-on: ubuntu-latest",
+        "    permissions: {}",
+        "    outputs:",
+        "      type: ${{ steps.set_type.outputs.type }}",
+        "    steps:",
+        "      - name: Check tag",
+        "        id: set_type",
+        "        env:",
+        "          GIT_REF: ${{ inputs.git_ref }}",
+    ]
+    if per_program:
+        head.append("          PROGRAM: ${{ inputs.program }}")
+    head += ["        run: |", f"          # {comment}"]
+    if per_program:
+        body = ['          case "$PROGRAM" in']
+        for prog, tag in tags.items():
+            body.append(f'            {prog}) TAG={tag} ;;')
+        body += [
+            '            *) echo "::error::unknown program \'$PROGRAM\'"; exit 1 ;;',
+            '          esac',
+            '          if [[ "$GIT_REF" == release/*@* ]]; then',
+            '            if [[ "$GIT_REF" != "release/${TAG}@"* ]]; then',
+            '              echo "::error::\'$GIT_REF\' is not a release tag of $PROGRAM (expected release/${TAG}@<version>)"',
+            '              exit 1',
+            '            fi',
+            '            echo "type=release" >> "$GITHUB_OUTPUT"',
+            '          else',
+            '            echo "type=ref" >> "$GITHUB_OUTPUT"',
+            '          fi',
+        ]
+    else:
+        patterns = "|".join(f"release/{t}@*" for t in dict.fromkeys(tags.values()))
+        expected = ", ".join(f"release/{t}@<version>" for t in dict.fromkeys(tags.values()))
+        body = [
+            '          case "$GIT_REF" in',
+            f'            {patterns}) echo "type=release" >> "$GITHUB_OUTPUT" ;;',
+            f'            release/*@*) echo "::error::\'$GIT_REF\' is not a release tag of this repository (expected {expected})"; exit 1 ;;',
+            '            *) echo "type=ref" >> "$GITHUB_OUTPUT" ;;',
+            '          esac',
+        ]
+    return "\n".join(head + body) + "\n"
+
+
+def concurrency(group, comment):
+    return f"concurrency:\n  # {comment}\n  group: {group}\n  cancel-in-progress: false\n"
 
 
 def gen_publish_js():
@@ -220,8 +265,9 @@ def gen_publish_js():
         "",
         "permissions: {}",
         "",
+        concurrency("publish-js-client", "One JS publish at a time: each bumps the version and opens a release PR."),
         "jobs:",
-        CHECK_TAG % "A program release tag was already built and tested when it was cut.",
+        check_tag("A program release tag was already built and tested when it was cut.", per_program=False),
     ]
     out.append(job("build_programs", "Programs", "build-programs", needs="check_tag",
                    cond="needs.check_tag.outputs.type == 'ref'", perms=["contents: read"],
@@ -237,8 +283,8 @@ def gen_publish_js():
                    "      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}\n"
                    "      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}\n"
                    "      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}")
-    out.append(job("publish", "JS client", "publish-js-client", needs=["check_tag", "test_js"],
-                   cond="|\n      always()\n      && (needs.test_js.result == 'success' || needs.test_js.result == 'skipped')",
+    out.append(job("publish", "JS client", "publish-js-client", needs=["check_tag", "build_programs", "test_js"],
+                   cond=gating(["test_js"]),
                    perms=["contents: write", "pull-requests: write", "id-token: write"], secrets_block=secrets,
                    with_pairs=[("git_ref", "${{ inputs.git_ref }}"), ("bump", "${{ inputs.bump }}"),
                                ("tag", "${{ inputs.tag }}"), ("create_release", "${{ inputs.create_release }}"),
@@ -280,6 +326,8 @@ def gen_publish_rust():
         "",
         "permissions: {}",
         "",
+        concurrency("publish-rust-client" + ("-${{ inputs.client }}" if clients else ""),
+                    "One Rust publish per crate at a time."),
         "jobs:",
     ]
     out.append(job("build_programs", "Programs", "build-programs", perms=["contents: read"],
@@ -370,8 +418,17 @@ def test_jobs_for_release(git_ref_expr, program_expr):
 
 
 def gating(names):
-    conds = [f"(needs.{n}.result == 'success' || needs.{n}.result == 'skipped')" for n in names]
-    return "|\n      always()\n      && " + "\n      && ".join(conds)
+    """`if:` for a job that follows check_tag + build + tests.
+
+    A release tag skips build and test on purpose, so `skipped` must be
+    accepted there. On any other ref a skipped test means a dependency
+    failed, so build and every test must have succeeded. `!cancelled()`
+    instead of `always()` keeps the job from running after a cancel."""
+    ok = "\n          && ".join(f"needs.{n}.result == 'success'" for n in ["build_programs"] + list(names))
+    return ("|\n      !cancelled() && !failure()\n"
+            "      && needs.check_tag.result == 'success'\n"
+            "      && (needs.check_tag.outputs.type == 'release'\n"
+            f"          || ({ok}))")
 
 
 def gen_create_release():
@@ -409,6 +466,7 @@ def gen_create_release():
         "",
         "permissions: {}",
         "",
+        concurrency("create-release-${{ inputs.program }}", "One release per program at a time."),
         "jobs:",
     ]
     SPEC["_deploy"] = False
@@ -501,8 +559,10 @@ def gen_deploy():
         "",
         "permissions: {}",
         "",
+        concurrency("deploy-${{ inputs.program }}-${{ inputs.cluster }}",
+                    "One deploy per program and cluster at a time; a running deploy is never cancelled."),
         "jobs:",
-        CHECK_TAG % "A release tag deploys the asset attached to the GitHub release; any\n          # other ref is built and tested first.",
+        check_tag("A release tag deploys the asset attached to the GitHub release; any\n          # other ref is built and tested first.", per_program=True),
     ]
     SPEC["_deploy"] = True
     out += test_jobs_for_release("${{ inputs.git_ref }}", "${{ inputs.program }}")
@@ -521,7 +581,7 @@ def gen_deploy():
         secrets.append(f"      DEPLOYER_KEYPAIR: {de}")
     if dep.get("squads_bot_secret", "SQUADS_BOT_KEY"):
         secrets.append(f"      SQUADS_BOT_KEY: ${{{{ secrets.{dep.get('squads_bot_secret', 'SQUADS_BOT_KEY')} }}}}")
-    out.append(job("deploy", "Program", "deploy-program", needs=["check_tag"] + gate, cond=gating(gate),
+    out.append(job("deploy", "Program", "deploy-program", needs=["check_tag", "build_programs"] + gate, cond=gating(gate),
                    perms=["contents: write"], secrets_block="\n".join(secrets),
                    with_pairs=[("program", "${{ inputs.program }}"), ("cluster", "${{ inputs.cluster }}"),
                                ("git_ref", "${{ inputs.git_ref }}"), ("dry_run", "${{ inputs.dry_run }}"),
@@ -591,8 +651,9 @@ def main():
     files = {
         repo / ".github" / "programs.json": gen_programs_json(),
         wf / "main.yml": gen_main(),
-        wf / "create-release.yml": gen_create_release(),
     }
+    if SPEC.get("create_release", True):
+        files[wf / "create-release.yml"] = gen_create_release()
     if SPEC.get("deploy"):
         files[wf / "deploy-program.yml"] = gen_deploy()
         if SPEC.get("verify") is not False:
