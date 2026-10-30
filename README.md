@@ -46,7 +46,9 @@ The reference caller lives in
 
 ### programs.json
 
-Every shared workflow that takes a `git_ref` (`build-programs`, `test-programs`, `create-release`, `deploy-program`, `verify-program`) reads `programs.json` from the revision the run is for (`github.sha`), not from `git_ref`, so a release tag cut before the file existed still builds and deploys with today's cluster configuration. `.github/.env` is read from `git_ref`, because toolchain pins belong with the code they build; the one exception is the host tools of `deploy-program` and `verify-program` (`DEPLOY_SOLANA_VERSION`, `SOLANA_VERIFY_VERSION`, `SOLANA_VERIFY_RUST_VERSION`), which come from `github.sha` so that an old release can still be verified with a verifier that compiles today.
+Every shared workflow that takes a `git_ref` (`build-programs`, `test-programs`, `create-release`, `deploy-program`, `verify-program`) reads `programs.json` from the revision the run is for (`github.sha`), not from `git_ref`, so a release tag cut before the file existed still builds and deploys with today's cluster configuration. `.github/.env` is read from `git_ref`, because toolchain pins belong with the code they build; the one exception is the host tools (`DEPLOY_SOLANA_VERSION`, `SOLANA_VERIFY_VERSION`, `SOLANA_VERIFY_RUST_VERSION`), which `build-programs`, `deploy-program` and `verify-program` take from `github.sha` so that an old release can still be built and verified with a verifier that compiles today. The Squads helper crate (`configs/scripts/program/squads-verified-upgrade`) is deploy tooling and comes from `github.sha` as well.
+
+The generated dispatch workflows resolve the `git_ref` they were given to one commit in their `check_tag` job and pass that commit to every build, test, publish, release and deploy job, so a branch that moves during the run, or a branch named like a tag, cannot make one job work on different source than another. `deploy-program` additionally takes the release tag the commit was resolved from (`release_tag`) to download that release's asset instead of the build artifact.
 
 ```json
 {

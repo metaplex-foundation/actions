@@ -103,12 +103,6 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          registry-url: https://registry.npmjs.org
-
-      - name: Install npm with trusted publishing support
-        # Trusted publishing needs npm 11.5.1 or newer; pinned because this
-        # job holds id-token: write.
-        run: npm install -g npm@11.21.1
 
       - name: Install client dependencies
         uses: ./.mpl-actions/install-node-dependencies
@@ -147,6 +141,19 @@ jobs:
             *) pnpm version "$BUMP" --no-git-tag-version ;;
           esac
           echo "new_version=$(pnpm pkg get version | tr -d '"')" >> "$GITHUB_OUTPUT"
+
+      # The package is built and bumped with the repository's NODE_VERSION
+      # above; only the publish itself runs on the Node.js that npm trusted
+      # publishing requires (22.14 or newer, with npm 11.5.1 or newer).
+      - name: Install Node.js for publishing
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Install npm with trusted publishing support
+        # Pinned because this job holds id-token: write.
+        run: npm install -g npm@11.21.1
 
       - name: Publish
         working-directory: ./${{ inputs.client_dir }}

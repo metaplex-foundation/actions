@@ -1,8 +1,9 @@
 name: Release Rust client
 
-# Reusable workflow. Called when a `release/rust-client-*` pull request is
-# merged. For every crate directory in `client_matrix` whose Cargo.toml
-# changed in the merge commit, reads the crate name and version, pushes the
+# Reusable workflow. Called when a `release/rust-client-<name>-v<version>`
+# pull request is merged. Finds the crate in `client_matrix` whose name and
+# version the branch names (with no `head_ref`, the crate whose Cargo.toml
+# the merge commit changed), checks that version is on crates.io, pushes the
 # `<name>@v<version>` tag and creates the GitHub release. Repos with several
 # Rust clients list them all and only the released one is tagged.
 
@@ -16,6 +17,11 @@ on:
         default: '["clients/rust"]'
       merge_commit_sha:
         description: The merge commit to tag; defaults to the triggering commit
+        type: string
+        required: false
+        default: ""
+      head_ref:
+        description: The merged pull request's branch (release/rust-client-<name>-v<version>), which names the crate and version to release
         type: string
         required: false
         default: ""
@@ -43,23 +49,41 @@ jobs:
         id: crates
         env:
           CLIENT_MATRIX: ${{ inputs.client_matrix }}
+          HEAD_REF: ${{ inputs.head_ref }}
         run: |
           set -euo pipefail
+          # publish-rust-client names the branch after what it published, so
+          # the branch, not the merge diff, says which crate and version to
+          # tag: a rebase merge can leave the bump outside the last commit.
+          EXPECTED="${HEAD_REF#release/rust-client-}"
           released=()
           for dir in $(jq -r '.[]' <<< "$CLIENT_MATRIX"); do
             manifest="$dir/Cargo.toml"
-            if ! git diff --name-only HEAD^1 HEAD -- "$manifest" | grep -q .; then
-              echo "$manifest unchanged in the merge commit, skipping"
-              continue
-            fi
             NAME="$(grep -E '^name\s*=' "$manifest" | head -n1 | awk -F '"' '{print $2}')"
             VERSION="$(grep -E '^version\s*=' "$manifest" | head -n1 | awk -F '"' '{print $2}')"
             if [ -z "$NAME" ] || [ -z "$VERSION" ]; then
               echo "::error::failed to read name/version from $manifest"
               exit 1
             fi
+            if [ -n "$HEAD_REF" ]; then
+              if [ "${NAME}-v${VERSION}" != "$EXPECTED" ]; then
+                echo "$manifest is ${NAME} ${VERSION}, not what the branch ${HEAD_REF} released, skipping"
+                continue
+              fi
+            elif ! git diff --name-only HEAD^1 HEAD -- "$manifest" | grep -q .; then
+              echo "$manifest unchanged in the merge commit, skipping"
+              continue
+            fi
             if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*$'; then
               echo "::error::invalid version '$VERSION' in $manifest"
+              exit 1
+            fi
+            # The release PR normally comes from publish-rust-client, which
+            # has already published. A hand-made release/rust-client-* branch
+            # has not, and must not be tagged as a release.
+            if ! curl -sfS -A "metaplex-foundation/actions release-rust-client" \
+                 "https://crates.io/api/v1/crates/${NAME}/${VERSION}" >/dev/null; then
+              echo "::error::${NAME} ${VERSION} is not on crates.io; publish it before merging a release PR"
               exit 1
             fi
             TAG="${NAME}@v${VERSION}"
@@ -80,7 +104,11 @@ jobs:
             released+=("$TAG")
           done
           if [ "${#released[@]}" -eq 0 ]; then
-            echo "::error::no crate in $CLIENT_MATRIX had its Cargo.toml changed by this merge"
+            if [ -n "$HEAD_REF" ]; then
+              echo "::error::no crate in $CLIENT_MATRIX is at the name and version the branch $HEAD_REF released ($EXPECTED)"
+            else
+              echo "::error::no crate in $CLIENT_MATRIX had its Cargo.toml changed by this merge"
+            fi
             exit 1
           fi
           echo "tags=$(printf '%s\n' "${released[@]}" | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"

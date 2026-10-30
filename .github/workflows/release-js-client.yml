@@ -17,6 +17,11 @@ on:
         type: string
         required: false
         default: ""
+      head_ref:
+        description: The merged pull request's branch (release/js-client-v<version>); the merged package.json must carry that version
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -38,11 +43,20 @@ jobs:
       - name: Read package version
         id: pkg
         working-directory: ./${{ inputs.client_dir }}
+        env:
+          HEAD_REF: ${{ inputs.head_ref }}
         run: |
           set -euo pipefail
           VERSION="$(node -p "require('./package.json').version")"
           if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*$'; then
             echo "::error::invalid version '$VERSION' in package.json"
+            exit 1
+          fi
+          # publish-js-client named the branch after the version it
+          # published; a PR whose package.json moved on since would tag a
+          # version that is not the one on npm.
+          if [ -n "$HEAD_REF" ] && [ "${HEAD_REF#release/js-client-v}" != "$VERSION" ]; then
+            echo "::error::branch $HEAD_REF released a different version than package.json's $VERSION"
             exit 1
           fi
           NAME="$(node -p "require('./package.json').name")"

@@ -179,22 +179,33 @@ def release_tags():
     return {p["name"]: p.get("release_tag", p["name"]) for p in SPEC["programs"]}
 
 
-def check_tag(comment, per_program):
-    """The check_tag job: classifies git_ref as `release` or `ref`.
+SHA = "${{ needs.check_tag.outputs.sha }}"
+
+
+def check_tag(comment, per_program, releases=True):
+    """The check_tag job: classifies git_ref as `release` or `ref` and
+    resolves it to one commit (`sha`) that every later job checks out.
 
     Only this repository's own release tags count as `release`; any other
     release/*@* ref is an error rather than a reason to skip build and test.
-    With `per_program` the tag must also belong to the selected program."""
+    With `per_program` the tag must also belong to the selected program; with
+    `releases=False` (create-release) no release tag is accepted at all.
+
+    Resolving once matters: an unqualified name is resolved by each
+    checkout separately, so a branch that moves between build and publish
+    would publish untested code, and a branch named like a tag would win
+    over the tag."""
     tags = release_tags()
     head = [
         "  check_tag:",
         "    name: Check tag",
         "    runs-on: ubuntu-latest",
         "    permissions:",
-        "      # Confirms the release tag exists.",
+        "      # Confirms the release tag exists and resolves the ref to a commit.",
         "      contents: read",
         "    outputs:",
         "      type: ${{ steps.set_type.outputs.type }}",
+        "      sha: ${{ steps.set_type.outputs.sha }}",
         "    steps:",
         "      - name: Check tag",
         "        id: set_type",
@@ -205,7 +216,15 @@ def check_tag(comment, per_program):
     if per_program:
         head.append("          PROGRAM: ${{ inputs.program }}")
     head += ["        run: |", f"          # {comment}"]
-    if per_program:
+    if not releases:
+        body = [
+            '          if [[ "$GIT_REF" == release/*@* ]]; then',
+            '            echo "::error::a release is cut from a commit or branch, not from the release tag \'$GIT_REF\'"',
+            '            exit 1',
+            '          fi',
+            '          TYPE=ref',
+        ] + tag_exists()
+    elif per_program:
         body = ['          case "$PROGRAM" in']
         for prog, tag in tags.items():
             body.append(f'            {prog}) TAG={tag} ;;')
@@ -236,14 +255,27 @@ def check_tag(comment, per_program):
 
 
 def tag_exists():
-    """A branch named like a release tag must not skip build and test."""
+    """A branch named like a release tag must not skip build and test, and
+    every job downstream gets the same commit."""
     return [
         '          if [ "$TYPE" = release ]; then',
         '            # Only an existing tag skips build and test; a branch named like one does not.',
-        '            gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GIT_REF}" --silent \\',
+        '            OBJ="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GIT_REF}" --jq \'.object.type + " " + .object.sha\')" \\',
         '              || { echo "::error::\'$GIT_REF\' is not an existing tag of this repository"; exit 1; }',
+        '            read -r OBJ_TYPE SHA <<< "$OBJ"',
+        '            if [ "$OBJ_TYPE" = tag ]; then',
+        '              # Annotated tag: follow it to the commit.',
+        '              SHA="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${SHA}" --jq .object.sha)"',
+        '            fi',
+        '          elif [ -z "$GIT_REF" ]; then',
+        '            SHA="$GITHUB_SHA"',
+        '          else',
+        '            SHA="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GIT_REF}" --jq .sha)" \\',
+        '              || { echo "::error::\'$GIT_REF\' is not a commit, branch or tag of this repository"; exit 1; }',
         '          fi',
         '          echo "type=$TYPE" >> "$GITHUB_OUTPUT"',
+        '          echo "sha=$SHA" >> "$GITHUB_OUTPUT"',
+        '          echo "$GIT_REF -> $SHA ($TYPE)"',
     ]
 
 
@@ -290,12 +322,12 @@ def gen_publish_js():
     ]
     out.append(job("build_programs", "Programs", "build-programs", needs="check_tag",
                    cond="needs.check_tag.outputs.type == 'ref'", perms=["contents: read"],
-                   with_pairs=[("git_ref", "${{ inputs.git_ref }}"),
+                   with_pairs=[("git_ref", SHA),
                                ("apt_packages", s.get("build_apt_packages", "")),
                                ("runner", s.get("runners", {}).get("build_programs", ""))]))
     out.append(job("test_js", "JS client", "test-js-client", needs=["check_tag", "build_programs"],
                    cond="needs.check_tag.outputs.type == 'ref'", perms=["contents: read"],
-                   secrets_block=js_secrets(), with_pairs=[("git_ref", "${{ inputs.git_ref }}")] + js_opts()))
+                   secrets_block=js_secrets(), with_pairs=[("git_ref", SHA)] + js_opts()))
     secrets = ""
     if pj.get("deploy_docs"):
         secrets = ("    secrets:\n"
@@ -305,7 +337,7 @@ def gen_publish_js():
     out.append(job("publish", "JS client", "publish-js-client", needs=["check_tag", "build_programs", "test_js"],
                    cond=gating(["test_js"]),
                    perms=["contents: write", "pull-requests: write", "id-token: write"], secrets_block=secrets,
-                   with_pairs=[("git_ref", "${{ inputs.git_ref }}"), ("bump", "${{ inputs.bump }}"),
+                   with_pairs=[("git_ref", SHA), ("bump", "${{ inputs.bump }}"),
                                ("tag", "${{ inputs.tag }}"), ("create_release", "${{ inputs.create_release }}"),
                                ("client_dir", s.get("js_client_dir", "")),
                                ("deploy_docs", "true" if pj.get("deploy_docs") else "")]))
@@ -395,6 +427,9 @@ def gen_release(kind):
             pairs.append(("client_matrix", "'" + json.dumps([c["dir"] for c in clients]) + "'"))
         elif s.get("rust_client_dir"):
             pairs.append(("client_matrix", "'" + json.dumps([s["rust_client_dir"]]) + "'"))
+    # The branch name carries the version publish-*-client released; the
+    # release workflow tags only that version.
+    pairs.append(("head_ref", "${{ github.event.pull_request.head.ref }}"))
     body.append(job("release", label, wf,
                     cond=f"|\n      github.event.pull_request.merged == true\n      && startsWith(github.event.pull_request.head.ref, 'release/{kind}-client-')\n      && github.event.pull_request.head.repo.full_name == github.repository",
                     perms=["contents: write"], with_pairs=pairs))
@@ -413,25 +448,25 @@ def rust_client_gates():
 
 
 def test_jobs_for_release(git_ref_expr, program_expr):
-    """build + test_programs + test_js + test_rust jobs used by create-release and deploy."""
+    """build + test_programs + test_js + test_rust jobs used by create-release and deploy.
+
+    Both follow a check_tag job; only deploy skips build and test for a
+    release tag, create-release never takes one."""
     s = SPEC
     jobs = []
-    jobs.append(job("build_programs", "Programs", "build-programs", needs="check_tag" if s.get("_deploy") else None,
-                    cond="needs.check_tag.outputs.type == 'ref'" if s.get("_deploy") else None,
+    cond = "needs.check_tag.outputs.type == 'ref'" if s.get("_deploy") else None
+    jobs.append(job("build_programs", "Programs", "build-programs", needs="check_tag", cond=cond,
                     perms=["contents: read"],
                     with_pairs=[("git_ref", git_ref_expr), ("apt_packages", s.get("build_apt_packages", "")),
                                 ("runner", s.get("runners", {}).get("build_programs", ""))]))
-    needs = ["check_tag", "build_programs"] if s.get("_deploy") else None
-    cond = "needs.check_tag.outputs.type == 'ref'" if s.get("_deploy") else None
+    needs = ["check_tag", "build_programs"]
     jobs.append(job("test_programs", "Programs", "test-programs", needs=needs, cond=cond, perms=["contents: read"],
                     with_pairs=[("program_matrix", f"'[\"{program_expr}\"]'"), ("git_ref", git_ref_expr)] + program_opts()))
     if s.get("js_client", True):
-        jobs.append(job("test_js", "JS client", "test-js-client",
-                        needs=needs or "build_programs", cond=cond, perms=["contents: read"],
+        jobs.append(job("test_js", "JS client", "test-js-client", needs=needs, cond=cond, perms=["contents: read"],
                         secrets_block=js_secrets(), with_pairs=[("git_ref", git_ref_expr)] + js_opts()))
     if rust_client_gates():
-        jobs.append(job("test_rust", "Rust client", "test-rust-client",
-                        needs=needs or "build_programs", cond=cond, perms=["contents: read"],
+        jobs.append(job("test_rust", "Rust client", "test-rust-client", needs=needs, cond=cond, perms=["contents: read"],
                         with_pairs=[("git_ref", git_ref_expr)] + rust_client_opts()))
     return jobs
 
@@ -487,19 +522,21 @@ def gen_create_release():
         "",
         concurrency("create-release-${{ inputs.program }}", "One release per program at a time."),
         "jobs:",
+        check_tag("Resolve the branch to one commit: build, test and the release tag must\n          # all refer to the same source, even if the branch moves meanwhile.",
+                  per_program=False, releases=False),
     ]
     SPEC["_deploy"] = False
-    out += test_jobs_for_release("${{ inputs.git_ref }}", "${{ inputs.program }}")
+    out += test_jobs_for_release(SHA, "${{ inputs.program }}")
     needs = [n for n in ["test_js", "test_rust", "test_programs"]
              if n != "test_js" or s.get("js_client", True)]
     needs = [n for n in needs if n != "test_rust" or rust_client_gates()]
     # create-release downloads the build artifact, so it waits for the build
     # even when no test job carries that dependency.
-    needs = ["build_programs"] + needs
+    needs = ["check_tag", "build_programs"] + needs
     out.append(job("create_release", "Program", "create-release", needs=needs, perms=["contents: write"],
                    with_pairs=[("program", "${{ inputs.program }}"), ("bump", "${{ inputs.bump }}"),
                                ("type", "${{ inputs.type }}" if types else ""),
-                               ("git_ref", "${{ inputs.git_ref }}")]))
+                               ("git_ref", SHA)]))
     return "\n".join(out).rstrip("\n") + "\n"
 
 
@@ -590,7 +627,7 @@ def gen_deploy():
         check_tag("A release tag deploys the asset attached to the GitHub release; any\n          # other ref is built and tested first.", per_program=True),
     ]
     SPEC["_deploy"] = True
-    out += test_jobs_for_release("${{ inputs.git_ref }}", "${{ inputs.program }}")
+    out += test_jobs_for_release(SHA, "${{ inputs.program }}")
     SPEC["_deploy"] = False
     gate = [n for n in ["test_js", "test_programs", "test_rust"]
             if (n != "test_js" or s.get("js_client", True)) and (n != "test_rust" or rust_client_gates())]
@@ -609,7 +646,9 @@ def gen_deploy():
     out.append(job("deploy", "Program", "deploy-program", needs=["check_tag", "build_programs"] + gate, cond=gating(gate),
                    perms=["contents: write"], secrets_block="\n".join(secrets),
                    with_pairs=[("program", "${{ inputs.program }}"), ("cluster", "${{ inputs.cluster }}"),
-                               ("git_ref", "${{ inputs.git_ref }}"), ("dry_run", "${{ inputs.dry_run }}"),
+                               ("git_ref", SHA),
+                               ("release_tag", "${{ needs.check_tag.outputs.type == 'release' && inputs.git_ref || '' }}"),
+                               ("dry_run", "${{ inputs.dry_run }}"),
                                ("runner", s.get("runners", {}).get("deploy", ""))]))
     return "\n".join(out).rstrip("\n") + "\n"
 
@@ -667,10 +706,24 @@ def gen_programs_json():
     return json.dumps(doc, indent=2) + "\n"
 
 
+def check_spec():
+    """Reject combinations that generate a broken main.yml."""
+    s = SPEC
+    clients = [k for k, on in [("js_client", s.get("js_client", True)),
+                               ("rust_client", s.get("rust_client", True) and s.get("main_rust_client", True)),
+                               ("benchmark", bool(s.get("benchmark")))] if on]
+    if clients and not s.get("generate_clients", True):
+        sys.exit(f"generate_clients: false but {clients} need the generate_clients job; disable them too")
+    if clients and s.get("build_programs_filter", "any") != "any":
+        sys.exit(f"build_programs_filter must stay 'any' while {clients} are enabled: "
+                 "a client-only change must still build the programs the client jobs depend on")
+
+
 def main():
     global SPEC
     spec_path, repo = sys.argv[1], Path(sys.argv[2])
     SPEC = json.loads(Path(spec_path).read_text())
+    check_spec()
     wf = repo / ".github" / "workflows"
     wf.mkdir(parents=True, exist_ok=True)
     files = {

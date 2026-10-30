@@ -111,8 +111,13 @@ jobs:
           # that branch does not exist yet (fresh repos, anything made from the
           # template). Give it a local empty branch instead: `store` pushes it
           # and so creates the remote branch; `summary` reports without a baseline.
-          if gh api "repos/${GITHUB_REPOSITORY}/branches/gh-pages" --silent 2>/dev/null; then
+          if out=$(gh api "repos/${GITHUB_REPOSITORY}/branches/gh-pages" --silent 2>&1); then
             echo "skip_fetch=false" >> "$GITHUB_OUTPUT"
+          elif ! grep -q "HTTP 404" <<< "$out"; then
+            # Only a confirmed 404 means "no branch"; anything else would make
+            # `summary` skip the baseline and `store` push unrelated history.
+            echo "::error::could not check for the gh-pages branch: $out"
+            exit 1
           else
             echo "::notice::No gh-pages branch yet; benchmark history starts with this run"
             tree=$(git mktree </dev/null)

@@ -87,13 +87,21 @@ jobs:
           path: .mpl-actions
           persist-credentials: false
 
+      - name: Hide the shared actions from git
+        shell: bash
+        # cargo-release refuses to run in a dirty tree and counts untracked
+        # files; the local exclude keeps .mpl-actions out of its view without
+        # a .gitignore entry in every repository.
+        run: echo ".mpl-actions/" >> .git/info/exclude
+
       - name: Load environment variables
         uses: ./.mpl-actions/load-env
 
       - name: Install Rust
         uses: ./.mpl-actions/install-rust
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          # The client may target a newer toolchain than the program.
+          toolchain: ${{ env.RUST_CLIENT_RUST_VERSION || env.RUST_VERSION }}
 
       - name: Install cargo-release
         uses: ./.mpl-actions/install-cargo-release
@@ -116,9 +124,11 @@ jobs:
             BUMP="$LEVEL"
           fi
 
-          OPTIONS=()
+          # The checkout is the tested commit, a detached HEAD, which
+          # cargo-release's default allow-branch (`*`, `!HEAD`) rejects.
+          OPTIONS=(--allow-branch HEAD)
           if [ "$DRY_RUN" = "false" ]; then
-            OPTIONS=(--no-push --no-tag --no-confirm --execute)
+            OPTIONS+=(--no-push --no-tag --no-confirm --execute)
             git config user.name "${COMMIT_USER_NAME:-github-actions}"
             git config user.email "${COMMIT_USER_EMAIL:-github-actions@github.com}"
           fi

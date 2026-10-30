@@ -75,13 +75,25 @@ jobs:
           # from the revision this run is for, not from git_ref: a release tag
           # cut before the file existed must still build.
           ref: ${{ github.sha }}
-          sparse-checkout: .github/programs.json
+          sparse-checkout: |
+            .github/programs.json
+            .github/.env
           sparse-checkout-cone-mode: false
           path: .mpl-caller
           persist-credentials: false
 
       - name: Load environment variables
         uses: ./.mpl-actions/load-env
+
+      - name: Load host tool pins from the dispatched revision
+        uses: ./.mpl-actions/load-env
+        with:
+          # solana-verify is a host tool compiled from source: an old release
+          # with an old RUST_VERSION still needs a verifier that compiles
+          # today. The build image pin (SOLANA_VERIFY_BUILD_VERSION) stays
+          # with the code so the rebuild is reproducible.
+          file: .mpl-caller/.github/.env
+          keys: SOLANA_VERIFY_VERSION SOLANA_VERIFY_RUST_VERSION
 
       - name: Sanitize ref
         id: ref
@@ -194,7 +206,10 @@ jobs:
           for script in "${scripts[@]}"; do
             if [ -f "$script" ]; then
               echo "+ $script ./programs/.bin"
-              bash "$script" ./programs/.bin
+              # -e as when the scripts were `source`d under the default shell:
+              # a failed `solana program dump` must fail the build, not ship
+              # an artifact missing a program the tests load.
+              bash -e "$script" ./programs/.bin
             else
               echo "::notice::$script not found, skipping"
             fi

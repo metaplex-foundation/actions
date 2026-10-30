@@ -6,6 +6,8 @@
     "1.18.26": "solanafoundation/solana-verifiable-build@sha256:ec2e20e1f80607150a71e4c72adfe64be24347ed0b4fb741c32b34eaf7549a25",
     "1.18.22": "solanafoundation/solana-verifiable-build@sha256:7804e1076ef24d4840f4fec24c88b5be8008e947cad2705516666a9f24b39de3",
     "1.18.21": "solanafoundation/solana-verifiable-build@sha256:d72ae60cb3890bcf444ab9f626e6db380235a2c0ef1e8aee1bc530fe3633c4be",
-    "1.18.19": "solanafoundation/solana-verifiable-build@sha256:25e4973b5ccb7d8eca1cc1e90fe07edb7a799075c78ac5a91cc4ff95fb4f3ec3"
+    "1.18.19": "solanafoundation/solana-verifiable-build@sha256:25e4973b5ccb7d8eca1cc1e90fe07edb7a799075c78ac5a91cc4ff95fb4f3ec3",
+    "1.18.15": "solanafoundation/solana-verifiable-build@sha256:f3682ce269baccc41505585cb5b78444e330cbbb2b2d1c79312917c292c30638",
+    "1.17.25": "solanafoundation/solana-verifiable-build@sha256:3b32c8394ee98507289de8a6d63e964a629a4f4f13dbc9c05354e228c415ab92"
   }
 }

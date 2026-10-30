@@ -64,6 +64,13 @@ jobs:
           ref: ${{ inputs.git_ref }}
           persist-credentials: false
 
+      - name: Resolve commit
+        id: commit
+        shell: bash
+        # The verified-build PDA records the deployed commit, not the
+        # revision this workflow was dispatched from.
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Checkout shared actions
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -182,6 +189,7 @@ jobs:
           package: ${{ steps.program.outputs.package }}
           mount-path: ${{ steps.program.outputs.workspace }}
           solana-version: ${{ steps.plan.outputs.verify_build_version }}
+          commit-hash: ${{ steps.commit.outputs.sha }}
           uploader: ${{ steps.plan.outputs.vault }}
           repo-visibility: ${{ steps.plan.outputs.repo_visibility }}
           # OtterSec has no devnet verifier; the rebuild and hash comparison
@@ -200,6 +208,7 @@ jobs:
           package: ${{ steps.program.outputs.package }}
           mount-path: ${{ steps.program.outputs.workspace }}
           solana-version: ${{ steps.plan.outputs.verify_build_version }}
+          commit-hash: ${{ steps.commit.outputs.sha }}
           repo-visibility: ${{ steps.plan.outputs.repo_visibility }}
 
       - name: Clean up signer files
