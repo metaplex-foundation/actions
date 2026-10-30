@@ -1,0 +1,86 @@
+name: Load CI environment
+
+description: |
+  Export the toolchain pins in `.github/.env` into `$GITHUB_ENV`.
+
+  Only an allowlisted set of keys is imported. A blanket
+  `cat .github/.env >> "$GITHUB_ENV"` would let a PR that edits the file
+  inject arbitrary environment variables (PATH, LD_PRELOAD, CARGO_HOME...)
+  into every later step of a job that may hold secrets. Values are stripped
+  of surrounding single or double quotes, so `NAME="x"` and `NAME=x` are
+  equivalent.
+
+  Known keys (all optional unless a workflow says otherwise):
+
+    CARGO_TERM_COLOR            cargo colour output
+    NODE_VERSION                Node.js version for JS clients (e.g. 22.x)
+    RUST_VERSION                host Rust toolchain for building and testing programs
+    IDL_RUST_VERSION            Rust toolchain for IDL generation when it differs from RUST_VERSION
+    SOLANA_VERSION              Solana/Agave CLI used to build, test and run the validator
+    DEPLOY_SOLANA_VERSION       Solana/Agave CLI used by deploy and verify (defaults to SOLANA_VERSION)
+    ANCHOR_VERSION              anchor-cli version, when IDL generation needs it
+    SBF_TOOLS_VERSION           platform-tools version passed to cargo build-sbf/test-sbf (e.g. v1.53)
+    SOLANA_VERIFY_VERSION       solana-verify version
+    SOLANA_VERIFY_BUILD_VERSION Solana version that selects the verifiable-build image (defaults to SOLANA_VERSION)
+    SOLANA_VERIFY_RUST_VERSION  host Rust toolchain needed to `cargo install solana-verify` (defaults to RUST_VERSION)
+    RUST_CLIENT_RUST_VERSION    Rust toolchain for the Rust client (defaults to RUST_VERSION)
+    RUST_CLIENT_SOLANA_VERSION  Solana version for the Rust client tests (defaults to SOLANA_VERSION)
+    COMMIT_USER_NAME            git identity for commits made by CI
+    COMMIT_USER_EMAIL           git identity for commits made by CI
+    PROGRAMS                    JSON array of program directory names under programs/ (used by the repo's own scripts)
+
+inputs:
+  file:
+    description: Path to the env file
+    required: true
+    default: .github/.env
+  keys:
+    description: |
+      Space-separated list of keys to import. Defaults to every known key
+      listed above. A key that is not in the known list is refused even if
+      named here, so workflows cannot widen the allowlist by accident.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Load environment variables
+      shell: bash
+      env:
+        ENV_FILE: ${{ inputs.file }}
+        REQUESTED_KEYS: ${{ inputs.keys }}
+      run: |
+        set -euo pipefail
+
+        KNOWN="CARGO_TERM_COLOR NODE_VERSION RUST_VERSION IDL_RUST_VERSION SOLANA_VERSION DEPLOY_SOLANA_VERSION ANCHOR_VERSION SBF_TOOLS_VERSION SOLANA_VERIFY_VERSION SOLANA_VERIFY_BUILD_VERSION SOLANA_VERIFY_RUST_VERSION RUST_CLIENT_RUST_VERSION RUST_CLIENT_SOLANA_VERSION COMMIT_USER_NAME COMMIT_USER_EMAIL PROGRAMS"
+
+        if [ ! -f "$ENV_FILE" ]; then
+          echo "::error::$ENV_FILE not found"
+          exit 1
+        fi
+
+        WANTED="${REQUESTED_KEYS:-$KNOWN}"
+
+        for key in $WANTED; do
+          case " $KNOWN " in
+            *" $key "*) ;;
+            *) echo "::error::'$key' is not an allowlisted .env key"; exit 1 ;;
+          esac
+          # Last assignment wins, like a shell would do.
+          line="$(grep -E "^${key}=" "$ENV_FILE" | tail -n1 || true)"
+          [ -n "$line" ] || continue
+          value="${line#*=}"
+          # Strip one pair of surrounding quotes.
+          case "$value" in
+            \"*\") value="${value#\"}"; value="${value%\"}" ;;
+            \'*\') value="${value#\'}"; value="${value%\'}" ;;
+          esac
+          # Refuse values that could smuggle a second assignment or a
+          # multi-line heredoc delimiter into $GITHUB_ENV.
+          if printf '%s' "$value" | grep -q '[[:cntrl:]]'; then
+            echo "::error::$key contains control characters"
+            exit 1
+          fi
+          printf '%s=%s\n' "$key" "$value" >> "$GITHUB_ENV"
+        done

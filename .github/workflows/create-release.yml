@@ -1,0 +1,134 @@
+name: Create program release
+
+# Reusable workflow: the release half of a program release. The caller builds
+# and tests first, then calls this with the program name. Computes the next
+# `release/<release_tag>@x.y.z` tag from the existing tags, creates the GitHub
+# release and attaches `<library>.so` from the program-builds artifact.
+#
+# `type` selects the tag family: `solana` (release/<tag>), `svm`
+# (release/<tag>-svm) or `commit` (release/<tag>-<short sha>).
+
+on:
+  workflow_call:
+    inputs:
+      program:
+        description: Program name as listed in .github/programs.json
+        type: string
+        required: true
+      bump:
+        description: Version bump (patch, minor, major)
+        type: string
+        required: false
+        default: patch
+      type:
+        description: Tag family (solana, svm, commit)
+        type: string
+        required: false
+        default: solana
+      git_ref:
+        description: Commit, branch or tag the release is cut from; defaults to the triggering commit
+        type: string
+        required: false
+        default: ""
+    outputs:
+      tag:
+        description: The release tag that was created
+        value: ${{ jobs.release.outputs.tag }}
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Create program release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.git_ref || github.sha }}
+          persist-credentials: false
+          fetch-tags: true
+
+      - name: Checkout shared actions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit of this reusable workflow file, so every composite
+          # action below resolves from the same pinned commit the caller chose.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .mpl-actions
+          persist-credentials: false
+
+      - name: Program info
+        id: program
+        uses: ./.mpl-actions/program-info
+        with:
+          name: ${{ inputs.program }}
+
+      - name: Compute next version
+        id: version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.program.outputs.release_tag }}
+          TYPE: ${{ inputs.type }}
+          BUMP: ${{ inputs.bump }}
+          GIT_REF: ${{ inputs.git_ref }}
+        run: |
+          set -euo pipefail
+          # Tags were fetched by the checkout above (fetch-tags), which still
+          # had credentials; nothing here talks to the remote.
+          case "$TYPE" in
+            solana) TAG_NAME="release/${RELEASE_TAG}" ;;
+            svm) TAG_NAME="release/${RELEASE_TAG}-svm" ;;
+            commit) TAG_NAME="release/${RELEASE_TAG}-$(git rev-parse --short=7 HEAD)" ;;
+            *) echo "::error::invalid type '$TYPE' (expected solana, svm or commit)"; exit 1 ;;
+          esac
+          # Highest existing version in this tag family; first release starts at 0.0.0.
+          VERSION="$(git tag -l "${TAG_NAME}@*" | sed "s|${TAG_NAME}@||" | sort -V | tail -n1)"
+          VERSION="${VERSION:-0.0.0}"
+          IFS=. read -r MAJOR MINOR PATCH <<< "$VERSION"
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+            *) echo "::error::invalid bump '$BUMP' (expected patch, minor or major)"; exit 1 ;;
+          esac
+          NEXT="${MAJOR}.${MINOR}.${PATCH}"
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG_NAME}@${NEXT}" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Next release: ${TAG_NAME}@${NEXT} (previous ${VERSION})"
+
+      - name: Sanitize ref
+        id: ref
+        uses: ./.mpl-actions/sanitize-ref
+        with:
+          ref: ${{ inputs.git_ref }}
+
+      - name: Download program builds
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ steps.ref.outputs.artifact }}
+
+      - name: Check artifact
+        shell: bash
+        env:
+          LIBRARY: ${{ steps.program.outputs.library }}
+        run: test -f "programs/.bin/${LIBRARY}.so" || { echo "::error::programs/.bin/${LIBRARY}.so missing from the program-builds artifact"; exit 1; }
+
+      - name: Create release
+        uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1.21.0
+        with:
+          tag: ${{ steps.version.outputs.tag }}
+          commit: ${{ steps.version.outputs.commit }}
+          name: ${{ steps.version.outputs.tag }}
+          body: Release ${{ steps.version.outputs.tag }}
+          artifacts: programs/.bin/${{ steps.program.outputs.library }}.so
+          artifactContentType: application/octet-stream
+          draft: false
+          prerelease: false

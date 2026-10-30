@@ -1,0 +1,93 @@
+name: Release Rust client
+
+# Reusable workflow. Called when a `release/rust-client-*` pull request is
+# merged. For every crate directory in `client_matrix` whose Cargo.toml
+# changed in the merge commit, reads the crate name and version, pushes the
+# `<name>@v<version>` tag and creates the GitHub release. Repos with several
+# Rust clients list them all and only the released one is tagged.
+
+on:
+  workflow_call:
+    inputs:
+      client_matrix:
+        description: JSON array of Rust client crate directories to consider
+        type: string
+        required: false
+        default: '["clients/rust"]'
+      merge_commit_sha:
+        description: The merge commit to tag; defaults to the triggering commit
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Tag and release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.merge_commit_sha || github.sha }}
+          # The merge commit and its first parent, to see which crate changed.
+          fetch-depth: 2
+          # This job pushes the tags below.
+          persist-credentials: true
+
+      - name: Tag released crates
+        id: crates
+        env:
+          CLIENT_MATRIX: ${{ inputs.client_matrix }}
+        run: |
+          set -euo pipefail
+          released=()
+          for dir in $(jq -r '.[]' <<< "$CLIENT_MATRIX"); do
+            manifest="$dir/Cargo.toml"
+            if ! git diff --name-only HEAD^1 HEAD -- "$manifest" | grep -q .; then
+              echo "$manifest unchanged in the merge commit, skipping"
+              continue
+            fi
+            NAME="$(grep -E '^name\s*=' "$manifest" | head -n1 | awk -F '"' '{print $2}')"
+            VERSION="$(grep -E '^version\s*=' "$manifest" | head -n1 | awk -F '"' '{print $2}')"
+            if [ -z "$NAME" ] || [ -z "$VERSION" ]; then
+              echo "::error::failed to read name/version from $manifest"
+              exit 1
+            fi
+            if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*$'; then
+              echo "::error::invalid version '$VERSION' in $manifest"
+              exit 1
+            fi
+            TAG="${NAME}@v${VERSION}"
+            if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+              echo "::notice::$TAG already exists, skipping"
+              continue
+            fi
+            git tag "$TAG"
+            git push origin "$TAG"
+            released+=("$TAG")
+          done
+          if [ "${#released[@]}" -eq 0 ]; then
+            echo "::error::no crate in $CLIENT_MATRIX had its Cargo.toml changed by this merge"
+            exit 1
+          fi
+          echo "tags=$(printf '%s\n' "${released[@]}" | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub releases
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          TAGS: ${{ steps.crates.outputs.tags }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            for (const tag of JSON.parse(process.env.TAGS)) {
+              const [name, version] = tag.split('@v');
+              await github.rest.repos.createRelease({
+                owner, repo, tag_name: tag, name: `${name} v${version}`, generate_release_notes: true,
+              });
+              core.info(`released ${tag}`);
+            }

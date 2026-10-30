@@ -1,0 +1,174 @@
+name: Test programs
+
+# Reusable workflow. For each program in `program_matrix`: cargo fmt --check,
+# cargo clippy, then the caller's `configs/scripts/program/test.sh` with
+# PROGRAM set to the program name (the template script runs cargo test-sbf
+# from programs/<name>).
+
+on:
+  workflow_call:
+    inputs:
+      program_matrix:
+        description: JSON array of program names to test
+        type: string
+        required: true
+      git_ref:
+        description: Commit, branch or tag to test; defaults to the triggering commit
+        type: string
+        required: false
+        default: ""
+      runner:
+        description: Runner label
+        type: string
+        required: false
+        default: ubuntu-latest
+      apt_packages:
+        description: Extra apt packages the tests need (space separated), e.g. protobuf-compiler
+        type: string
+        required: false
+        default: ""
+      sbf_tools_version:
+        description: |
+          When set, install solana-cargo-build-sbf and solana-cargo-test-sbf at
+          this crate version in front of the Solana CLI's copies (e.g. 4.0.0).
+        type: string
+        required: false
+        default: ""
+      free_disk_space:
+        description: Remove unused preinstalled toolchains before building (native test binaries can exhaust the 14 GB runner disk)
+        type: boolean
+        required: false
+        default: false
+      clippy_deny_warnings:
+        description: Fail clippy on warnings (-D warnings)
+        type: boolean
+        required: false
+        default: false
+      cache:
+        description: Use dependency caches
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        program: ${{ fromJson(inputs.program_matrix) }}
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.git_ref || github.sha }}
+          persist-credentials: false
+
+      - name: Checkout shared actions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit of this reusable workflow file, so every composite
+          # action below resolves from the same pinned commit the caller chose.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .mpl-actions
+          persist-credentials: false
+
+      - name: Free disk space
+        if: inputs.free_disk_space
+        shell: bash
+        run: |
+          echo "Before:"; df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          echo "After:"; df -h /
+
+      - name: Load environment variables
+        uses: ./.mpl-actions/load-env
+
+      - name: Program info
+        id: program
+        uses: ./.mpl-actions/program-info
+        with:
+          name: ${{ matrix.program }}
+
+      - name: Install apt packages
+        if: inputs.apt_packages != ''
+        shell: bash
+        env:
+          PACKAGES: ${{ inputs.apt_packages }}
+        run: |
+          sudo apt-get update
+          # shellcheck disable=SC2086
+          sudo apt-get install -y $PACKAGES
+
+      - name: Install Rust
+        uses: ./.mpl-actions/install-rust
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Install Solana
+        uses: ./.mpl-actions/install-solana
+        with:
+          version: ${{ env.SOLANA_VERSION }}
+          cache: ${{ inputs.cache }}
+
+      - name: Install SBF test tools
+        if: inputs.sbf_tools_version != ''
+        shell: bash
+        env:
+          VERSION: ${{ inputs.sbf_tools_version }}
+        run: |
+          cargo install solana-cargo-build-sbf --version "$VERSION" --locked
+          cargo install solana-cargo-test-sbf --version "$VERSION" --locked
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache program dependencies
+        if: inputs.cache
+        uses: ./.mpl-actions/cache-program
+        with:
+          folder: ./programs/${{ matrix.program }}
+          key: program-${{ matrix.program }}
+
+      - name: Run cargo fmt
+        shell: bash
+        env:
+          MANIFEST: ${{ steps.program.outputs.manifest }}
+          PACKAGE: ${{ steps.program.outputs.package }}
+        run: |
+          # A workspace-root manifest (several programs in one Cargo workspace)
+          # needs --package; a per-program manifest formats everything in it.
+          if [ "$(dirname "$MANIFEST")" = "." ]; then
+            cargo fmt --package "$PACKAGE" -- --check
+          else
+            cargo fmt --all --manifest-path "$MANIFEST" -- --check
+          fi
+
+      - name: Run cargo clippy
+        shell: bash
+        env:
+          MANIFEST: ${{ steps.program.outputs.manifest }}
+          PACKAGE: ${{ steps.program.outputs.package }}
+          DENY: ${{ inputs.clippy_deny_warnings }}
+        run: |
+          extra=()
+          [ "$DENY" = "true" ] && extra=(-- -D warnings)
+          if [ "$(dirname "$MANIFEST")" = "." ]; then
+            cargo clippy --all-targets --all-features --no-deps --package "$PACKAGE" "${extra[@]}"
+          else
+            cargo clippy --all-targets --all-features --no-deps --manifest-path "$MANIFEST" "${extra[@]}"
+          fi
+
+      - name: Run tests
+        shell: bash
+        working-directory: configs/scripts/program
+        run: RUST_LOG=error ./test.sh
+        env:
+          PROGRAM: ${{ matrix.program }}

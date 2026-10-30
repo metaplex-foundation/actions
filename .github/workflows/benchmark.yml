@@ -1,0 +1,131 @@
+name: Benchmark
+
+# Reusable workflow. Runs the JS client's `pnpm bench` against the local
+# validator and either stores the result on the gh-pages branch (push to the
+# default branch) or posts a comparison comment on the pull request.
+
+on:
+  workflow_call:
+    inputs:
+      git_ref:
+        description: Commit, branch or tag; defaults to the triggering commit
+        type: string
+        required: false
+        default: ""
+      mode:
+        description: "`store` (persist to gh-pages, for pushes) or `summary` (comment on the PR)"
+        type: string
+        required: false
+        default: store
+      client_dir:
+        description: Path to the JS client package
+        type: string
+        required: false
+        default: clients/js
+      cache:
+        description: Use dependency caches
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: ${{ inputs.mode == 'summary' && 'Performance regression summary' || 'Performance regression check' }}
+    runs-on: ubuntu-latest
+    permissions:
+      # gh-pages branch updates (store) and PR comments (summary).
+      contents: write
+      deployments: write
+      pull-requests: write
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.git_ref || github.sha }}
+          persist-credentials: false
+
+      - name: Checkout shared actions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit of this reusable workflow file, so every composite
+          # action below resolves from the same pinned commit the caller chose.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .mpl-actions
+          persist-credentials: false
+
+      - name: Load environment variables
+        uses: ./.mpl-actions/load-env
+
+      - name: Sanitize ref
+        id: ref
+        uses: ./.mpl-actions/sanitize-ref
+        with:
+          ref: ${{ inputs.git_ref }}
+
+      - name: Download program builds
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ steps.ref.outputs.artifact }}
+
+      - name: Install Solana
+        uses: ./.mpl-actions/install-solana
+        with:
+          version: ${{ env.SOLANA_VERSION }}
+          cache: ${{ inputs.cache }}
+
+      - name: Install Node.js
+        uses: ./.mpl-actions/install-node-with-pnpm
+        with:
+          version: ${{ env.NODE_VERSION }}
+          cache: ${{ inputs.cache }}
+          dependencies: true
+
+      - name: Start validator
+        run: pnpm validator
+
+      - name: Install client dependencies
+        uses: ./.mpl-actions/install-node-dependencies
+        with:
+          folder: ./${{ inputs.client_dir }}
+          cache: ${{ inputs.cache }}
+          key: clients-js
+
+      - name: Build
+        working-directory: ./${{ inputs.client_dir }}
+        run: pnpm build
+
+      - name: Benchmark
+        working-directory: ./${{ inputs.client_dir }}
+        run: pnpm bench
+
+      - name: Download previous benchmark data
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ./cache
+          key: ${{ runner.os }}-benchmark
+
+      - name: Store benchmark result
+        if: inputs.mode != 'summary'
+        uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc # v1.22.2
+        with:
+          tool: customSmallerIsBetter
+          output-file-path: ./${{ inputs.client_dir }}/output.json
+          fail-on-alert: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+
+      - name: Summarize benchmark result
+        if: inputs.mode == 'summary'
+        uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc # v1.22.2
+        with:
+          tool: customSmallerIsBetter
+          output-file-path: ./${{ inputs.client_dir }}/output.json
+          summary-always: true
+          comment-always: true
+          save-data-file: false
+          fail-on-alert: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}

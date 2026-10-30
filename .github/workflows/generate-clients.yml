@@ -1,0 +1,128 @@
+name: Generate clients
+
+# Reusable workflow. Runs the caller's `pnpm generate` (IDLs via shank or
+# anchor, then clients via kinobi/codama) and fails when the result differs
+# from what is committed, so generated code can never drift from the program.
+
+on:
+  workflow_call:
+    inputs:
+      git_ref:
+        description: Commit, branch or tag; defaults to the triggering commit
+        type: string
+        required: false
+        default: ""
+      runner:
+        description: Runner label
+        type: string
+        required: false
+        default: ubuntu-latest
+      install_anchor:
+        description: Install anchor-cli at ANCHOR_VERSION (needed when IDLs come from `anchor idl build`)
+        type: boolean
+        required: false
+        default: false
+      apt_packages:
+        description: Extra apt packages (space separated); pkg-config, build-essential and libudev-dev are always installed
+        type: string
+        required: false
+        default: ""
+      cache:
+        description: Use dependency caches
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    name: Generate clients
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.git_ref || github.sha }}
+          persist-credentials: false
+
+      - name: Checkout shared actions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit of this reusable workflow file, so every composite
+          # action below resolves from the same pinned commit the caller chose.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .mpl-actions
+          persist-credentials: false
+
+      - name: Load environment variables
+        uses: ./.mpl-actions/load-env
+
+      - name: Resolve toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          # IDL generation may need an older toolchain than the program build
+          # (Anchor 0.29/0.30 IDL builds); IDL_RUST_VERSION overrides when set.
+          echo "rust=${IDL_RUST_VERSION:-$RUST_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Linux build dependencies
+        shell: bash
+        env:
+          PACKAGES: ${{ inputs.apt_packages }}
+        run: |
+          sudo apt-get update
+          # shellcheck disable=SC2086
+          sudo apt-get install -y pkg-config build-essential libudev-dev $PACKAGES
+
+      - name: Install Rust
+        uses: ./.mpl-actions/install-rust
+        with:
+          toolchain: ${{ steps.toolchain.outputs.rust }}
+
+      - name: Install Solana
+        uses: ./.mpl-actions/install-solana
+        with:
+          version: ${{ env.SOLANA_VERSION }}
+          cache: ${{ inputs.cache }}
+
+      - name: Cache program dependencies
+        if: inputs.cache
+        uses: ./.mpl-actions/cache-programs
+
+      - name: Install Anchor CLI
+        if: inputs.install_anchor
+        uses: ./.mpl-actions/install-anchor-cli
+        with:
+          version: ${{ env.ANCHOR_VERSION }}
+          cache: ${{ inputs.cache }}
+
+      - name: Install Node.js
+        uses: ./.mpl-actions/install-node-with-pnpm
+        with:
+          version: ${{ env.NODE_VERSION }}
+          cache: ${{ inputs.cache }}
+          dependencies: true
+
+      - name: Cache IDL generators
+        if: inputs.cache
+        uses: ./.mpl-actions/cache-idl-generators
+
+      - name: Generate IDLs and clients
+        run: pnpm generate
+
+      - name: Ensure working directory is clean
+        shell: bash
+        run: |
+          # .mpl-actions is this workflow's own checkout, not generated output.
+          STATUS="$(git status --porcelain -- . ':(exclude).mpl-actions')"
+          if [ -n "$STATUS" ]; then
+            echo "::error::generated clients differ from the committed ones; run 'pnpm generate' and commit the result"
+            echo "$STATUS"
+            git --no-pager diff -- . ':(exclude).mpl-actions' | head -n 200
+            exit 1
+          fi

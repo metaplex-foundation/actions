@@ -1,0 +1,174 @@
+name: Verify program
+
+# Reusable workflow. Rebuilds the program deterministically and checks the
+# on-chain hash, then handles the verified-build PDA per the cluster's deploy
+# type in `.github/programs.json`:
+#
+#   squads   the vault already wrote the PDA during deploy, so run
+#            `submit-remote-job`: rebuild, compare hashes and (mainnet-beta,
+#            public repos only) submit the OtterSec job for the vault's PDA.
+#   direct   `verify-from-repo`: write the PDA with DEPLOYER_KEYPAIR and
+#            notify OtterSec when the repo is public.
+#
+# Secrets:
+#   RPC_URL             RPC endpoint for the cluster (required)
+#   PROGRAM_ID_KEYPAIR  JSON keypair of the program id (required)
+#   DEPLOYER_KEYPAIR    uploader keypair for `direct` clusters
+
+on:
+  workflow_call:
+    inputs:
+      program:
+        description: Program name as listed in .github/programs.json
+        type: string
+        required: true
+      cluster:
+        description: Cluster key under deploy.clusters in programs.json
+        type: string
+        required: true
+      git_ref:
+        description: Release tag, commit or branch that was deployed
+        type: string
+        required: true
+      runner:
+        description: Runner label
+        type: string
+        required: false
+        default: ubuntu-latest
+      cache:
+        description: Use dependency caches
+        type: boolean
+        required: false
+        default: true
+    secrets:
+      RPC_URL:
+        required: true
+      PROGRAM_ID_KEYPAIR:
+        required: true
+      DEPLOYER_KEYPAIR:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.git_ref }}
+          persist-credentials: false
+
+      - name: Checkout shared actions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit of this reusable workflow file, so every composite
+          # action below resolves from the same pinned commit the caller chose.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .mpl-actions
+          persist-credentials: false
+
+      - name: Load environment variables
+        uses: ./.mpl-actions/load-env
+
+      - name: Program info
+        id: program
+        uses: ./.mpl-actions/program-info
+        with:
+          name: ${{ inputs.program }}
+
+      - name: Resolve verification
+        id: plan
+        shell: bash
+        env:
+          DEPLOY_JSON: ${{ steps.program.outputs.deploy }}
+          CLUSTER: ${{ inputs.cluster }}
+        run: |
+          set -euo pipefail
+          CFG="$(jq -c --arg c "$CLUSTER" '.clusters[$c] // empty' <<< "$DEPLOY_JSON")"
+          [ -n "$CFG" ] || { echo "::error::cluster '$CLUSTER' is not configured under deploy.clusters in .github/programs.json"; exit 1; }
+          {
+            echo "type=$(jq -r '.type' <<< "$CFG")"
+            echo "vault=$(jq -r '.vault // ""' <<< "$CFG")"
+            echo "repo_visibility=$(jq -r '.repo_visibility // "public"' <<< "$DEPLOY_JSON")"
+            echo "deploy_solana=${DEPLOY_SOLANA_VERSION:-$SOLANA_VERSION}"
+            # solana-verify and the squads-verified-upgrade crate compile from
+            # source and may need a newer Rust than the program (bubblegum).
+            echo "host_rust=${SOLANA_VERIFY_RUST_VERSION:-$RUST_VERSION}"
+            echo "verify_build_version=${SOLANA_VERIFY_BUILD_VERSION:-$SOLANA_VERSION}"
+            echo "verify_version=${SOLANA_VERIFY_VERSION:-0.4.15}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        uses: ./.mpl-actions/install-rust
+        with:
+          toolchain: ${{ steps.plan.outputs.host_rust }}
+
+      - name: Install Solana
+        uses: ./.mpl-actions/install-solana
+        with:
+          version: ${{ steps.plan.outputs.deploy_solana }}
+          cache: ${{ inputs.cache }}
+
+      - name: Install solana-verify
+        uses: ./.mpl-actions/install-solana-verify
+        with:
+          version: ${{ steps.plan.outputs.verify_version }}
+          cache: ${{ inputs.cache }}
+
+      - name: Write signer files
+        shell: bash
+        env:
+          PROGRAM_ID_KEYPAIR: ${{ secrets.PROGRAM_ID_KEYPAIR }}
+          DEPLOYER_KEYPAIR: ${{ secrets.DEPLOYER_KEYPAIR }}
+          TYPE: ${{ steps.plan.outputs.type }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [ -n "$PROGRAM_ID_KEYPAIR" ] || { echo "::error::PROGRAM_ID_KEYPAIR secret is empty"; exit 1; }
+          printf '%s' "$PROGRAM_ID_KEYPAIR" > ./program-id.json
+          if [ "$TYPE" = "direct" ]; then
+            [ -n "$DEPLOYER_KEYPAIR" ] || { echo "::error::DEPLOYER_KEYPAIR secret is required to write the PDA for direct deploys"; exit 1; }
+            printf '%s' "$DEPLOYER_KEYPAIR" > ./deployer-key.json
+          fi
+
+      - name: Verify program (squads)
+        if: steps.plan.outputs.type == 'squads'
+        uses: ./.mpl-actions/verify-program
+        with:
+          mode: submit-remote-job
+          program-id-keypair: ./program-id.json
+          rpc-url: ${{ secrets.RPC_URL }}
+          library-name: ${{ steps.program.outputs.library }}
+          package: ${{ steps.program.outputs.package }}
+          mount-path: ${{ steps.program.outputs.workspace }}
+          solana-version: ${{ steps.plan.outputs.verify_build_version }}
+          uploader: ${{ steps.plan.outputs.vault }}
+          repo-visibility: ${{ steps.plan.outputs.repo_visibility }}
+          # OtterSec has no devnet verifier; the rebuild and hash comparison
+          # still run on every cluster.
+          submit-remote: ${{ inputs.cluster == 'mainnet-beta' && steps.plan.outputs.repo_visibility == 'public' }}
+
+      - name: Verify program (direct)
+        if: steps.plan.outputs.type == 'direct'
+        uses: ./.mpl-actions/verify-program
+        with:
+          mode: verify-from-repo
+          program-id-keypair: ./program-id.json
+          keypair: ./deployer-key.json
+          rpc-url: ${{ secrets.RPC_URL }}
+          library-name: ${{ steps.program.outputs.library }}
+          package: ${{ steps.program.outputs.package }}
+          mount-path: ${{ steps.program.outputs.workspace }}
+          solana-version: ${{ steps.plan.outputs.verify_build_version }}
+          repo-visibility: ${{ steps.plan.outputs.repo_visibility }}
+
+      - name: Clean up signer files
+        if: always()
+        run: rm -f ./deployer-key.json ./program-id.json

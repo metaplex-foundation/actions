@@ -1,0 +1,193 @@
+name: Build programs
+
+# Reusable workflow. Builds every program listed in the caller's
+# `.github/programs.json`, dumps the external programs the tests need, and
+# uploads everything under programs/.bin as one artifact named
+# `program-builds-<sanitized git_ref>` (`program-builds-default` when no ref
+# was given) for the test, release and deploy jobs to download.
+#
+# Per program, `build` in programs.json selects:
+#   verified (default)  solana-verify against a digest-pinned image chosen by
+#                       SOLANA_VERIFY_BUILD_VERSION (falls back to SOLANA_VERSION)
+#   sbf                 cargo build-sbf on the host toolchain, honouring
+#                       SBF_TOOLS_VERSION when set
+
+on:
+  workflow_call:
+    inputs:
+      git_ref:
+        description: Commit, branch or tag to build; defaults to the triggering commit
+        type: string
+        required: false
+        default: ""
+      runner:
+        description: Runner label
+        type: string
+        required: false
+        default: ubuntu-latest
+      apt_packages:
+        description: Extra apt packages the build needs (space separated), e.g. protobuf-compiler
+        type: string
+        required: false
+        default: ""
+      cache:
+        description: Use dependency caches
+        type: boolean
+        required: false
+        default: true
+    outputs:
+      artifact:
+        description: Name of the uploaded program-builds artifact
+        value: ${{ jobs.build.outputs.artifact }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+    outputs:
+      artifact: ${{ steps.ref.outputs.artifact }}
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.git_ref || github.sha }}
+          persist-credentials: false
+
+      - name: Checkout shared actions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit of this reusable workflow file, so every composite
+          # action below resolves from the same pinned commit the caller chose.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .mpl-actions
+          persist-credentials: false
+
+      - name: Load environment variables
+        uses: ./.mpl-actions/load-env
+
+      - name: Sanitize ref
+        id: ref
+        uses: ./.mpl-actions/sanitize-ref
+        with:
+          ref: ${{ inputs.git_ref }}
+
+      - name: Resolve build plan
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f .github/programs.json || { echo "::error::.github/programs.json not found"; exit 1; }
+          # Any program built with solana-verify needs the verifier installed;
+          # any program built with cargo build-sbf needs the host toolchain.
+          echo "verified=$(jq -r '[.programs[] | (.build // "verified")] | any(. == "verified")' .github/programs.json)" >> "$GITHUB_OUTPUT"
+          echo "sbf=$(jq -r '[.programs[] | (.build // "verified")] | any(. == "sbf")' .github/programs.json)" >> "$GITHUB_OUTPUT"
+          # solana-verify is compiled from source and may need a newer Rust
+          # than the program itself (bubblegum: 1.79 program, 1.85 verifier).
+          echo "host_rust=${SOLANA_VERIFY_RUST_VERSION:-$RUST_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "verify_build_version=${SOLANA_VERIFY_BUILD_VERSION:-$SOLANA_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "verify_version=${SOLANA_VERIFY_VERSION:-0.4.15}" >> "$GITHUB_OUTPUT"
+
+      - name: Install apt packages
+        if: inputs.apt_packages != ''
+        shell: bash
+        env:
+          PACKAGES: ${{ inputs.apt_packages }}
+        run: |
+          sudo apt-get update
+          # shellcheck disable=SC2086
+          sudo apt-get install -y $PACKAGES
+
+      - name: Install Rust
+        uses: ./.mpl-actions/install-rust
+        with:
+          toolchain: ${{ steps.plan.outputs.host_rust }}
+
+      - name: Install Solana
+        uses: ./.mpl-actions/install-solana
+        with:
+          version: ${{ env.SOLANA_VERSION }}
+          cache: ${{ inputs.cache }}
+
+      - name: Cache program dependencies
+        if: inputs.cache
+        uses: ./.mpl-actions/cache-programs
+
+      - name: Install solana-verify
+        if: steps.plan.outputs.verified == 'true'
+        uses: ./.mpl-actions/install-solana-verify
+        with:
+          version: ${{ steps.plan.outputs.verify_version }}
+          cache: ${{ inputs.cache }}
+
+      - name: Build programs
+        shell: bash
+        env:
+          VERIFY_BUILD_VERSION: ${{ steps.plan.outputs.verify_build_version }}
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          mkdir -p programs/.bin
+          jq -c '.programs[]' .github/programs.json | while read -r entry; do
+            name="$(jq -r '.name' <<< "$entry")"
+            underscored="${name//-/_}"
+            package="$(jq -r --arg d "${name}-program" '.package // $d' <<< "$entry")"
+            library="$(jq -r --arg d "${underscored}_program" '.library // $d' <<< "$entry")"
+            manifest="$(jq -r --arg d "programs/${name}/Cargo.toml" '.manifest // $d' <<< "$entry")"
+            workspace="$(jq -r '.workspace // "."' <<< "$entry")"
+            mode="$(jq -r '.build // "verified"' <<< "$entry")"
+            echo "::group::Build ${name} (${mode})"
+            case "$mode" in
+              verified)
+                LIBRARY_NAME="$library" PACKAGE_NAME="$package" \
+                SOLANA_VERSION="$VERIFY_BUILD_VERSION" \
+                WORKING_DIR="$workspace" \
+                OUTPUT_DIR="$ROOT/programs/.bin" \
+                LOOKUP_FILE="$ROOT/.mpl-actions/solana-verify-base-images.json" \
+                  bash "$ROOT/.mpl-actions/scripts/verified-build.sh"
+                ;;
+              sbf)
+                args=(cargo build-sbf --manifest-path "$manifest" --sbf-out-dir "$ROOT/programs/.bin")
+                if [ -n "${SBF_TOOLS_VERSION:-}" ]; then
+                  args+=(--tools-version "$SBF_TOOLS_VERSION")
+                fi
+                "${args[@]}"
+                ;;
+              *)
+                echo "::error::program '${name}': unknown build mode '${mode}' (expected verified or sbf)"
+                exit 1
+                ;;
+            esac
+            test -f "programs/.bin/${library}.so" || { echo "::error::expected programs/.bin/${library}.so after building ${name}"; exit 1; }
+            echo "::endgroup::"
+          done
+
+      - name: Dump external programs
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Default: the template's dump.sh. programs.json can list more under
+          # `dump_scripts` (each is run with the output directory as $1).
+          mapfile -t scripts < <(jq -r '.dump_scripts // ["configs/scripts/program/dump.sh"] | .[]' .github/programs.json)
+          for script in "${scripts[@]}"; do
+            if [ -f "$script" ]; then
+              echo "+ $script ./programs/.bin"
+              bash "$script" ./programs/.bin
+            else
+              echo "::notice::$script not found, skipping"
+            fi
+          done
+
+      - name: Upload program builds
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.ref.outputs.artifact }}
+          # First wildcard ensures exported paths are consistently under the programs folder.
+          path: ./program*/.bin/*.so
+          include-hidden-files: true
+          if-no-files-found: error

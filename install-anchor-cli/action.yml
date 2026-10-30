@@ -16,16 +16,16 @@ runs:
     - name: Cache Anchor CLI
       id: cache
       if: inputs.cache == 'true'
-      uses: actions/cache@v4
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ~/.cargo/bin/anchor
         key: ${{ runner.os }}-anchor-cli-v${{ inputs.version }}
 
-    - name: Install Achor CLI
+    - name: Install Anchor CLI
       if: inputs.cache != 'true' || steps.cache.outputs.cache-hit != 'true'
       run: |
-        cargo install anchor-cli --version ${{ inputs.version }} --root ~/.cargo
+        cargo install anchor-cli --version ${{ inputs.version }} --root ~/.cargo --locked
       shell: bash
 
     - name: Add Anchor CLI bin to Path

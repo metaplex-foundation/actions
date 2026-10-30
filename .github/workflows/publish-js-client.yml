@@ -1,0 +1,219 @@
+name: Publish JS client
+
+# Reusable workflow: the publish half of a JS client release. The caller's
+# workflow_dispatch workflow builds and tests first, then calls this with the
+# release inputs. Publishes to npm with provenance, then opens a release pull
+# request carrying the version bump; merging that PR triggers the caller's
+# release-js-client workflow which tags and creates the GitHub release.
+
+on:
+  workflow_call:
+    inputs:
+      git_ref:
+        description: Commit, branch or tag to publish from; defaults to the triggering ref
+        type: string
+        required: false
+        default: ""
+      bump:
+        description: Version bump (patch, minor, major, prerelease, prepatch, preminor, premajor)
+        type: string
+        required: true
+      tag:
+        description: npm dist-tag (and preid for pre-releases)
+        type: string
+        required: false
+        default: latest
+      create_release:
+        description: Open the release pull request and deploy docs
+        type: boolean
+        required: false
+        default: true
+      client_dir:
+        description: Path to the JS client package
+        type: string
+        required: false
+        default: clients/js
+      base_branch:
+        description: Base branch for the release pull request
+        type: string
+        required: false
+        default: main
+      deploy_docs:
+        description: Deploy the client docs to Vercel after publishing (needs VERCEL_* secrets)
+        type: boolean
+        required: false
+        default: false
+      cache:
+        description: Use dependency caches
+        type: boolean
+        required: false
+        default: true
+    secrets:
+      VERCEL_TOKEN:
+        required: false
+      VERCEL_ORG_ID:
+        required: false
+      VERCEL_PROJECT_ID:
+        required: false
+    outputs:
+      version:
+        description: The published version
+        value: ${{ jobs.publish.outputs.version }}
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      # npm provenance (OIDC trusted publishing).
+      id-token: write
+    outputs:
+      version: ${{ steps.bump.outputs.new_version }}
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.git_ref || github.ref }}
+          persist-credentials: false
+
+      - name: Checkout shared actions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit of this reusable workflow file, so every composite
+          # action below resolves from the same pinned commit the caller chose.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .mpl-actions
+          persist-credentials: false
+
+      - name: Load environment variables
+        uses: ./.mpl-actions/load-env
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://registry.npmjs.org
+
+      - name: Install npm with trusted publishing support
+        run: npm install -g "npm@>=11.5.1"
+
+      - name: Install client dependencies
+        uses: ./.mpl-actions/install-node-dependencies
+        with:
+          folder: ./${{ inputs.client_dir }}
+          cache: ${{ inputs.cache }}
+          key: clients-js
+
+      - name: Build
+        working-directory: ./${{ inputs.client_dir }}
+        run: pnpm build
+
+      - name: Bump version
+        id: bump
+        working-directory: ./${{ inputs.client_dir }}
+        env:
+          BUMP: ${{ inputs.bump }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          case "$BUMP" in
+            pre*) pnpm version "$BUMP" --preid "$TAG" --no-git-tag-version ;;
+            *) pnpm version "$BUMP" --no-git-tag-version ;;
+          esac
+          echo "new_version=$(pnpm pkg get version | tr -d '"')" >> "$GITHUB_OUTPUT"
+
+      - name: Publish
+        working-directory: ./${{ inputs.client_dir }}
+        env:
+          TAG: ${{ inputs.tag }}
+        run: npm publish --access public --tag "$TAG" --provenance
+
+      - name: Clean up
+        shell: bash
+        # The release PR must carry only the version bump, not the shared
+        # actions checkout.
+        run: rm -rf .mpl-actions
+
+      - name: Create release pull request
+        if: inputs.create_release
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          commit-message: 'chore: release JS client v${{ steps.bump.outputs.new_version }}'
+          branch: release/js-client-v${{ steps.bump.outputs.new_version }}
+          # Explicit base so the PR is created even when the checkout is a
+          # detached HEAD (dispatch with git_ref set to a tag or commit).
+          base: ${{ inputs.base_branch }}
+          title: 'chore: release JS client v${{ steps.bump.outputs.new_version }}'
+          body: |
+            ## Summary
+            - publish-js-client bumped the package to `${{ steps.bump.outputs.new_version }}` and published it to npm
+            - merging this PR tags `js@v${{ steps.bump.outputs.new_version }}` and creates the GitHub release
+          labels: release
+
+  deploy_docs:
+    name: Deploy docs
+    if: inputs.create_release && inputs.deploy_docs
+    runs-on: ubuntu-latest
+    needs: publish
+    permissions:
+      contents: read
+    environment:
+      name: js-client-documentation
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.git_ref || github.ref }}
+          persist-credentials: false
+
+      - name: Checkout shared actions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .mpl-actions
+          persist-credentials: false
+
+      - name: Load environment variables
+        uses: ./.mpl-actions/load-env
+
+      - name: Install Node.js
+        uses: ./.mpl-actions/install-node-with-pnpm
+        with:
+          version: ${{ env.NODE_VERSION }}
+          cache: ${{ inputs.cache }}
+
+      - name: Install client dependencies
+        uses: ./.mpl-actions/install-node-dependencies
+        with:
+          folder: ./${{ inputs.client_dir }}
+          cache: ${{ inputs.cache }}
+          key: clients-js
+
+      - name: Deploy to Vercel
+        id: deploy
+        working-directory: ./${{ inputs.client_dir }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The client declares vercel as a dev dependency; fall back to npx
+          # for repositories that do not.
+          if pnpm exec vercel --version >/dev/null 2>&1; then
+            VERCEL="pnpm exec vercel"
+          else
+            VERCEL="npx --yes vercel"
+          fi
+          echo "url=$($VERCEL deploy --prod --token="$VERCEL_TOKEN")" | tee "$GITHUB_OUTPUT"

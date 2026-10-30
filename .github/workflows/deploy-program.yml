@@ -1,0 +1,456 @@
+name: Deploy program
+
+# Reusable workflow: the deploy half of a program deployment. The caller's
+# workflow_dispatch workflow decides whether git_ref is a release tag (deploy
+# the release asset) or a commit (build and test first, then deploy the
+# artifact), then calls this with the program, cluster and secrets.
+#
+# How a cluster is deployed comes from `deploy.clusters.<cluster>` in the
+# caller's `.github/programs.json`:
+#
+#   {"type": "direct"}
+#       `solana program deploy` signed by DEPLOYER_KEYPAIR.
+#   {"type": "squads", "multisig": "...", "vault": "...", "program_index": 1}
+#       Write a buffer owned by the Squads vault, then open a Squads proposal.
+#       On devnet and mainnet-beta, when the caller ships
+#       configs/scripts/program/squads-verified-upgrade, the proposal bundles
+#       the program upgrade with the verified-build PDA write in one atomic
+#       transaction; otherwise the plain upgrade proposal is created.
+#   {"type": "squads-buffer", "multisig": "...", "vault": "..."}
+#       Write a buffer owned by the Squads vault and stop: the upgrade is
+#       proposed by hand in Squads from the buffer address in the job summary.
+#
+# Before handing a buffer to a vault the job checks that the vault is the
+# program's upgrade authority and that the buffer's contents hash to the
+# binary, so a wrong address or a corrupt upload cannot strand a buffer.
+#
+# Secrets:
+#   RPC_URL             RPC endpoint for the cluster (required)
+#   PROGRAM_ID_KEYPAIR  JSON keypair of the program id (required)
+#   DEPLOYER_KEYPAIR    upgrade-authority keypair for `direct` clusters
+#   SQUADS_BOT_KEY      submitter keypair for `squads` clusters
+
+on:
+  workflow_call:
+    inputs:
+      program:
+        description: Program name as listed in .github/programs.json
+        type: string
+        required: true
+      cluster:
+        description: Cluster key under deploy.clusters in programs.json (devnet, mainnet-beta, sonic-devnet, ...)
+        type: string
+        required: true
+      git_ref:
+        description: Release tag (release/<tag>@x.y.z) or commit that was built
+        type: string
+        required: true
+      dry_run:
+        description: Build everything but do not deploy, propose or tag
+        type: boolean
+        required: false
+        default: false
+      runner:
+        description: Runner label
+        type: string
+        required: false
+        default: ubuntu-latest
+      cache:
+        description: Use dependency caches
+        type: boolean
+        required: false
+        default: true
+    secrets:
+      RPC_URL:
+        required: true
+      PROGRAM_ID_KEYPAIR:
+        required: true
+      DEPLOYER_KEYPAIR:
+        required: false
+      SQUADS_BOT_KEY:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      # Download release assets and move the <program>-<cluster> tag.
+      contents: write
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.git_ref }}
+          persist-credentials: false
+
+      - name: Checkout shared actions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit of this reusable workflow file, so every composite
+          # action below resolves from the same pinned commit the caller chose.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .mpl-actions
+          persist-credentials: false
+
+      - name: Load environment variables
+        uses: ./.mpl-actions/load-env
+
+      - name: Program info
+        id: program
+        uses: ./.mpl-actions/program-info
+        with:
+          name: ${{ inputs.program }}
+
+      - name: Resolve deployment
+        id: plan
+        shell: bash
+        env:
+          DEPLOY_JSON: ${{ steps.program.outputs.deploy }}
+          CLUSTER: ${{ inputs.cluster }}
+          GIT_REF: ${{ inputs.git_ref }}
+          RELEASE_TAG: ${{ steps.program.outputs.release_tag }}
+          LIBRARY: ${{ steps.program.outputs.library }}
+        run: |
+          set -euo pipefail
+          CFG="$(jq -c --arg c "$CLUSTER" '.clusters[$c] // empty' <<< "$DEPLOY_JSON")"
+          if [ -z "$CFG" ]; then
+            echo "::error::cluster '$CLUSTER' is not configured under deploy.clusters for this program in .github/programs.json"
+            exit 1
+          fi
+          TYPE="$(jq -r '.type' <<< "$CFG")"
+          case "$TYPE" in
+            direct) ;;
+            squads|squads-buffer)
+              keys="multisig vault"
+              [ "$TYPE" = "squads" ] && keys="$keys program_index"
+              for key in $keys; do
+                jq -e --arg k "$key" '.[$k] != null' <<< "$CFG" >/dev/null || { echo "::error::$TYPE cluster '$CLUSTER' is missing deploy.clusters.$CLUSTER.$key"; exit 1; }
+              done
+              ;;
+            *) echo "::error::cluster '$CLUSTER' has unknown deploy type '$TYPE'"; exit 1 ;;
+          esac
+          {
+            echo "type=$TYPE"
+            echo "multisig=$(jq -r '.multisig // ""' <<< "$CFG")"
+            echo "vault=$(jq -r '.vault // ""' <<< "$CFG")"
+            echo "program_index=$(jq -r '.program_index // ""' <<< "$CFG")"
+            echo "spill=$(jq -r '.spill_address // ""' <<< "$DEPLOY_JSON")"
+            echo "expected_program_id=$(jq -r '.program_id // ""' <<< "$DEPLOY_JSON")"
+            echo "repo_visibility=$(jq -r '.repo_visibility // "public"' <<< "$DEPLOY_JSON")"
+            echo "deploy_solana=${DEPLOY_SOLANA_VERSION:-$SOLANA_VERSION}"
+            # solana-verify and the squads-verified-upgrade crate compile from
+            # source and may need a newer Rust than the program (bubblegum).
+            echo "host_rust=${SOLANA_VERIFY_RUST_VERSION:-$RUST_VERSION}"
+            echo "verify_build_version=${SOLANA_VERIFY_BUILD_VERSION:-$SOLANA_VERSION}"
+            echo "verify_version=${SOLANA_VERIFY_VERSION:-0.4.15}"
+            echo "binary=programs/.bin/${LIBRARY}.so"
+            if [[ "$GIT_REF" == "release/${RELEASE_TAG}@"* ]]; then echo "ref_type=release"; else echo "ref_type=ref"; fi
+            # Bundled (upgrade + verified-build PDA) proposals need the
+            # caller's crate and only make sense where OtterSec verification exists.
+            if [ "$TYPE" = "squads" ] && [ -f configs/scripts/program/squads-verified-upgrade/Cargo.toml ] && { [ "$CLUSTER" = "devnet" ] || [ "$CLUSTER" = "mainnet-beta" ]; }; then
+              echo "bundled=true"
+            else
+              echo "bundled=false"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        uses: ./.mpl-actions/install-rust
+        with:
+          toolchain: ${{ steps.plan.outputs.host_rust }}
+
+      - name: Install Solana
+        uses: ./.mpl-actions/install-solana
+        with:
+          version: ${{ steps.plan.outputs.deploy_solana }}
+          cache: ${{ inputs.cache }}
+
+      - name: Install solana-verify
+        if: ${{ !inputs.dry_run && steps.plan.outputs.bundled == 'true' }}
+        uses: ./.mpl-actions/install-solana-verify
+        with:
+          version: ${{ steps.plan.outputs.verify_version }}
+          cache: ${{ inputs.cache }}
+
+      - name: Sanitize ref
+        id: ref
+        uses: ./.mpl-actions/sanitize-ref
+        with:
+          ref: ${{ inputs.git_ref }}
+
+      - name: Download program builds
+        if: steps.plan.outputs.ref_type == 'ref'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ steps.ref.outputs.artifact }}
+
+      - name: Download release asset
+        if: steps.plan.outputs.ref_type == 'release'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          TAG: ${{ inputs.git_ref }}
+          BINARY: ${{ steps.plan.outputs.binary }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const tag = process.env.TAG;
+            const binary = process.env.BINARY;
+            const assetName = path.basename(binary);
+            const release = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner, repo: context.repo.repo, tag,
+            });
+            const asset = release.data.assets.find((a) => a.name === assetName);
+            if (!asset) throw new Error(`Asset ${assetName} not found in release ${tag}`);
+            const { data } = await github.rest.repos.getReleaseAsset({
+              owner: context.repo.owner, repo: context.repo.repo, asset_id: asset.id,
+              headers: { accept: 'application/octet-stream' },
+            });
+            fs.mkdirSync(path.dirname(binary), { recursive: true });
+            fs.writeFileSync(binary, Buffer.from(data));
+            core.info(`Downloaded ${assetName} (${fs.statSync(binary).size} bytes) from ${tag}`);
+
+      - name: Check binary
+        shell: bash
+        env:
+          BINARY: ${{ steps.plan.outputs.binary }}
+        run: test -f "$BINARY" || { echo "::error::$BINARY not found"; exit 1; }
+
+      - name: Write signer files
+        if: ${{ !inputs.dry_run }}
+        shell: bash
+        env:
+          PROGRAM_ID_KEYPAIR: ${{ secrets.PROGRAM_ID_KEYPAIR }}
+          DEPLOYER_KEYPAIR: ${{ secrets.DEPLOYER_KEYPAIR }}
+          SQUADS_BOT_KEY: ${{ secrets.SQUADS_BOT_KEY }}
+          TYPE: ${{ steps.plan.outputs.type }}
+          EXPECTED_PROGRAM_ID: ${{ steps.plan.outputs.expected_program_id }}
+          SPILL: ${{ steps.plan.outputs.spill }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [ -n "$PROGRAM_ID_KEYPAIR" ] || { echo "::error::PROGRAM_ID_KEYPAIR secret is empty"; exit 1; }
+          printf '%s' "$PROGRAM_ID_KEYPAIR" > ./program-id.json
+          # solana-keygen pubkey only emits the public key, never the secret.
+          PROGRAM_ID="$(solana-keygen pubkey ./program-id.json)"
+          if [ -n "$EXPECTED_PROGRAM_ID" ] && [ "$PROGRAM_ID" != "$EXPECTED_PROGRAM_ID" ]; then
+            echo "::error::PROGRAM_ID_KEYPAIR derives $PROGRAM_ID but programs.json says deploy.program_id is $EXPECTED_PROGRAM_ID"
+            exit 1
+          fi
+          echo "PROGRAM_ID=$PROGRAM_ID" >> "$GITHUB_ENV"
+          case "$TYPE" in
+            direct)
+              [ -n "$DEPLOYER_KEYPAIR" ] || { echo "::error::DEPLOYER_KEYPAIR secret is required for direct deploys"; exit 1; }
+              printf '%s' "$DEPLOYER_KEYPAIR" > ./deployer-key.json
+              ;;
+            squads|squads-buffer)
+              [ -n "$SQUADS_BOT_KEY" ] || { echo "::error::SQUADS_BOT_KEY secret is required for squads deploys"; exit 1; }
+              printf '%s' "$SQUADS_BOT_KEY" > ./submitter-key.json
+              # The bot pays for the buffer; unless programs.json names another
+              # spill address its lamports go back to the bot on upgrade.
+              if [ -z "$SPILL" ]; then
+                echo "SPILL_ADDRESS=$(solana-keygen pubkey ./submitter-key.json)" >> "$GITHUB_ENV"
+              else
+                echo "SPILL_ADDRESS=$SPILL" >> "$GITHUB_ENV"
+              fi
+              ;;
+          esac
+
+      - name: Deploy program (direct)
+        if: ${{ !inputs.dry_run && steps.plan.outputs.type == 'direct' }}
+        shell: bash
+        env:
+          RPC: ${{ secrets.RPC_URL }}
+          BINARY: ${{ steps.plan.outputs.binary }}
+        run: |
+          echo "Deploying ${{ inputs.program }} to ${{ inputs.cluster }}"
+          solana -v program deploy "$BINARY" \
+            -u "$RPC" \
+            --program-id ./program-id.json \
+            -k ./deployer-key.json \
+            --max-sign-attempts 100 \
+            --use-rpc
+
+      # Squads-deployed clusters need the vault to sign both the program
+      # upgrade and the verified-build PDA write. Export the PDA-write
+      # instruction first so a failed export aborts before writing an orphan
+      # buffer.
+      - name: Export verified-build PDA transaction
+        if: ${{ !inputs.dry_run && steps.plan.outputs.bundled == 'true' }}
+        uses: ./.mpl-actions/verify-program
+        with:
+          mode: export-pda-tx
+          program-id-keypair: ./program-id.json
+          uploader: ${{ steps.plan.outputs.vault }}
+          rpc-url: ${{ secrets.RPC_URL }}
+          library-name: ${{ steps.program.outputs.library }}
+          package: ${{ steps.program.outputs.package }}
+          mount-path: ${{ steps.program.outputs.workspace }}
+          solana-version: ${{ steps.plan.outputs.verify_build_version }}
+          repo-visibility: ${{ steps.plan.outputs.repo_visibility }}
+          submit-remote: false
+          output-file: verify-pda-tx.b58
+
+      - name: Write Squads buffer
+        if: ${{ !inputs.dry_run && steps.plan.outputs.squads == 'true' }}
+        shell: bash
+        env:
+          RPC: ${{ secrets.RPC_URL }}
+          BINARY: ${{ steps.plan.outputs.binary }}
+          VAULT: ${{ steps.plan.outputs.vault }}
+        run: |
+          set -euo pipefail
+          # Every `solana program` subcommand, even read-only ones, loads a
+          # signer, and the runner has no default keypair, so each call passes
+          # the bot key with -k.
+          hash() { python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read().rstrip(b"\0")).hexdigest())' "$1"; }
+          EXPECTED_HASH="$(hash "$BINARY")"
+          echo "EXPECTED_HASH=$EXPECTED_HASH" >> "$GITHUB_ENV"
+
+          # Refuse to hand a buffer to a vault that cannot upgrade the program.
+          UPGRADE_AUTHORITY="$(solana program show "$PROGRAM_ID" -u "$RPC" -k ./submitter-key.json --output json | jq -r '.authority')"
+          if [ "$UPGRADE_AUTHORITY" != "$VAULT" ]; then
+            echo "::error::upgrade authority of $PROGRAM_ID is $UPGRADE_AUTHORITY, expected the Squads vault $VAULT"
+            exit 1
+          fi
+
+          echo "Writing buffer for ${{ inputs.program }} on ${{ inputs.cluster }}"
+          BUFFER="$(solana program write-buffer -u "$RPC" -k ./submitter-key.json --max-sign-attempts 100 --use-rpc "$BINARY" | awk '{print $2}')"
+          [ -n "$BUFFER" ] || { echo "::error::write-buffer produced no buffer address"; exit 1; }
+          echo "Buffer: $BUFFER"
+          # Export before the authority change so the summary still surfaces
+          # the buffer if that change fails and the buffer needs reclaiming.
+          echo "BUFFER=$BUFFER" >> "$GITHUB_ENV"
+
+          # Only hand over a buffer whose contents match the binary.
+          solana program dump -u "$RPC" -k ./submitter-key.json "$BUFFER" ./buffer.so
+          BUFFER_HASH="$(hash ./buffer.so)"
+          if [ "$BUFFER_HASH" != "$EXPECTED_HASH" ]; then
+            echo "::error::buffer hash $BUFFER_HASH does not match the binary hash $EXPECTED_HASH"
+            exit 1
+          fi
+
+          solana program set-buffer-authority "$BUFFER" \
+            --new-buffer-authority "$VAULT" \
+            -k ./submitter-key.json \
+            -u "$RPC"
+          BUFFER_AUTHORITY="$(solana program show "$BUFFER" -u "$RPC" -k ./submitter-key.json --output json | jq -r '.authority')"
+          if [ "$BUFFER_AUTHORITY" != "$VAULT" ]; then
+            echo "::error::buffer authority is $BUFFER_AUTHORITY, expected the Squads vault $VAULT"
+            exit 1
+          fi
+          echo "BUFFER_AUTHORITY=$BUFFER_AUTHORITY" >> "$GITHUB_ENV"
+
+      # Pinned, isolated Rust crate (cargo --locked) rather than an npm helper,
+      # so no package install scripts run in the job that holds the bot key.
+      - name: Create bundled Squads proposal
+        if: ${{ !inputs.dry_run && steps.plan.outputs.bundled == 'true' }}
+        shell: bash
+        env:
+          RPC: ${{ secrets.RPC_URL }}
+          SQUADS_MULTISIG: ${{ steps.plan.outputs.multisig }}
+          SQUADS_VAULT: ${{ steps.plan.outputs.vault }}
+          SQUADS_PROGRAM_INDEX: ${{ steps.plan.outputs.program_index }}
+          PROGRAM_ID: ${{ env.PROGRAM_ID }}
+          SUBMITTER_KEYPAIR: ./submitter-key.json
+          PDA_TX_FILE: verify-pda-tx.b58
+          SPILL_ADDRESS: ${{ env.SPILL_ADDRESS }}
+        run: cargo run --locked --manifest-path configs/scripts/program/squads-verified-upgrade/Cargo.toml
+
+      - name: Create Squads proposal
+        if: ${{ !inputs.dry_run && steps.plan.outputs.type == 'squads' && steps.plan.outputs.bundled != 'true' }}
+        uses: metaplex-foundation/squads-program-upgrade@ffd43c7f9b91cf479ff5544ad3e10c923c10f4f9 # main 2026-10-30
+        with:
+          network-url: ${{ secrets.RPC_URL }}
+          program-multisig: ${{ steps.plan.outputs.multisig }}
+          program-id: ${{ env.PROGRAM_ID }}
+          program-index: ${{ steps.plan.outputs.program_index }}
+          buffer: ${{ env.BUFFER }}
+          spill-address: ${{ env.SPILL_ADDRESS }}
+          authority: ${{ steps.plan.outputs.vault }}
+          name: Deploy ${{ inputs.git_ref }}
+          keypair: ${{ secrets.SQUADS_BOT_KEY }}
+
+      # Each address sits in its own fenced block so GitHub renders a copy
+      # button next to it; the upgrade is proposed by hand from these.
+      - name: Write buffer summary
+        if: ${{ always() && steps.plan.outputs.type == 'squads-buffer' }}
+        shell: bash
+        env:
+          CLUSTER: ${{ inputs.cluster }}
+          GIT_REF: ${{ inputs.git_ref }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          PROGRAM: ${{ inputs.program }}
+          SQUADS_MULTISIG: ${{ steps.plan.outputs.multisig }}
+          SQUADS_VAULT: ${{ steps.plan.outputs.vault }}
+        run: |
+          # shellcheck disable=SC2016
+          address() {
+            printf '**%s**\n\n```\n%s\n```\n\n' "$1" "${2:-n/a}"
+          }
+          {
+            printf '# %s buffer on %s\n\n' "$PROGRAM" "$CLUSTER"
+            if [ "$DRY_RUN" = "true" ]; then
+              printf '> [!NOTE]\n> Dry run: no buffer was written.\n\n'
+            elif [ -z "${BUFFER:-}" ]; then
+              printf '> [!CAUTION]\n> No buffer was written. Check the "Write Squads buffer" step.\n\n'
+            elif [ "${BUFFER_AUTHORITY:-}" != "${SQUADS_VAULT:-}" ]; then
+              printf '> [!CAUTION]\n> The buffer below was written but its authority was not handed to the Squads vault. It is still owned by the spill address and should be closed with `solana program close`.\n\n'
+            else
+              printf '> [!IMPORTANT]\n> Buffer written and its authority handed to the Squads vault. Create the program upgrade in Squads with the buffer and spill address below.\n\n'
+            fi
+            printf '## Buffer address\n\n```\n%s\n```\n\n' "${BUFFER:-n/a}"
+            if [ -n "${BUFFER:-}" ] && [ "${BUFFER_AUTHORITY:-}" = "${SQUADS_VAULT:-}" ]; then
+              case "$CLUSTER" in
+                mainnet-beta) NETWORK=mainnet ;;
+                *) NETWORK="$CLUSTER" ;;
+              esac
+              SQUADS_URL="https://squads.metaplex.dev/#/programs?program=${PROGRAM}&network=${NETWORK}&buffer_address=${BUFFER}&expected_hash=${EXPECTED_HASH:-}"
+              printf '## Squads upgrade\n\n[Open in Squads](%s)\n\n```\n%s\n```\n\n' "$SQUADS_URL" "$SQUADS_URL"
+            fi
+            address "Expected hash (SHA-256)" "${EXPECTED_HASH:-}"
+            printf '## Addresses\n\n'
+            address "Program ID" "${PROGRAM_ID:-}"
+            address "Squads multisig" "${SQUADS_MULTISIG:-}"
+            address "Squads vault (buffer and upgrade authority)" "${SQUADS_VAULT:-}"
+            address "Spill address (buffer rent refund)" "${SPILL_ADDRESS:-}"
+            printf '## Source\n\n'
+            printf '| Cluster | Ref | Commit |\n| --- | --- | --- |\n'
+            printf '| %s | `%s` | `%s` |\n' "$CLUSTER" "$GIT_REF" "$(git rev-parse HEAD)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Move cluster tag
+        if: ${{ !inputs.dry_run }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          GIT_REF: ${{ inputs.git_ref }}
+          REF_TYPE: ${{ steps.plan.outputs.ref_type }}
+          ENV_TAG: ${{ steps.program.outputs.release_tag }}-${{ inputs.cluster }}
+        with:
+          script: |
+            const ref = process.env.REF_TYPE === 'release' ? `tags/${process.env.GIT_REF}` : process.env.GIT_REF;
+            const { owner, repo } = context.repo;
+            let sha;
+            try {
+              sha = (await github.rest.git.getRef({ owner, repo, ref })).data.object.sha;
+            } catch {
+              // A bare commit sha is not a ref; use it as-is.
+              sha = process.env.GIT_REF;
+            }
+            const tag = process.env.ENV_TAG;
+            try {
+              await github.rest.git.createRef({ owner, repo, ref: `refs/tags/${tag}`, sha });
+            } catch (err) {
+              if (err.status !== 422) throw err;
+              await github.rest.git.updateRef({ owner, repo, ref: `tags/${tag}`, sha, force: true });
+            }
+            core.info(`${tag} -> ${sha}`);
+
+      - name: Clean up signer files
+        if: always()
+        run: rm -f ./deployer-key.json ./program-id.json ./submitter-key.json ./buffer.so

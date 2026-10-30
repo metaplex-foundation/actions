@@ -1,0 +1,125 @@
+name: Build Rust client
+
+# Reusable workflow. cargo clippy and a release build of each Rust client
+# crate. Uses RUST_CLIENT_RUST_VERSION / RUST_CLIENT_SOLANA_VERSION when the
+# client targets a newer toolchain than the program.
+
+on:
+  workflow_call:
+    inputs:
+      git_ref:
+        description: Commit, branch or tag; defaults to the triggering commit
+        type: string
+        required: false
+        default: ""
+      runner:
+        description: Runner label
+        type: string
+        required: false
+        default: ubuntu-latest
+      client_matrix:
+        description: JSON array of Rust client crate directories
+        type: string
+        required: false
+        default: '["clients/rust"]'
+      features:
+        description: Cargo feature flags for clippy and build, e.g. --all-features (default is the default feature set)
+        type: string
+        required: false
+        default: ""
+      apt_packages:
+        description: Extra apt packages (space separated), e.g. protobuf-compiler
+        type: string
+        required: false
+        default: ""
+      cache:
+        description: Use dependency caches
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        client: ${{ fromJson(inputs.client_matrix) }}
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.git_ref || github.sha }}
+          persist-credentials: false
+
+      - name: Checkout shared actions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit of this reusable workflow file, so every composite
+          # action below resolves from the same pinned commit the caller chose.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .mpl-actions
+          persist-credentials: false
+
+      - name: Load environment variables
+        uses: ./.mpl-actions/load-env
+
+      - name: Resolve toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          echo "rust=${RUST_CLIENT_RUST_VERSION:-$RUST_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "solana=${RUST_CLIENT_SOLANA_VERSION:-$SOLANA_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Install apt packages
+        if: inputs.apt_packages != ''
+        shell: bash
+        env:
+          PACKAGES: ${{ inputs.apt_packages }}
+        run: |
+          sudo apt-get update
+          # shellcheck disable=SC2086
+          sudo apt-get install -y $PACKAGES
+
+      - name: Install Rust
+        uses: ./.mpl-actions/install-rust
+        with:
+          toolchain: ${{ steps.toolchain.outputs.rust }}
+
+      - name: Install Solana
+        uses: ./.mpl-actions/install-solana
+        with:
+          version: ${{ steps.toolchain.outputs.solana }}
+          cache: ${{ inputs.cache }}
+
+      - name: Cache client dependencies
+        if: inputs.cache
+        uses: ./.mpl-actions/cache-crate
+        with:
+          folder: ./${{ matrix.client }}
+          key: rust-client-${{ matrix.client }}
+
+      - name: Run cargo clippy
+        shell: bash
+        working-directory: ./${{ matrix.client }}
+        env:
+          FEATURES: ${{ inputs.features }}
+        run: |
+          # shellcheck disable=SC2086
+          cargo clippy --all-targets --no-deps $FEATURES
+
+      - name: Build Rust client
+        shell: bash
+        working-directory: ./${{ matrix.client }}
+        env:
+          FEATURES: ${{ inputs.features }}
+        run: |
+          # shellcheck disable=SC2086
+          cargo build --release $FEATURES
