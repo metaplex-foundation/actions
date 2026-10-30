@@ -101,8 +101,12 @@ jobs:
             commit) TAG_NAME="release/${RELEASE_TAG}-$(git rev-parse --short=7 HEAD)" ;;
             *) echo "::error::invalid type '$TYPE' (expected solana, svm or commit)"; exit 1 ;;
           esac
-          # Highest existing version in this tag family; first release starts at 0.0.0.
-          VERSION="$(git tag -l "${TAG_NAME}@*" | sed "s|${TAG_NAME}@||" | sort -V | tail -n1)"
+          # Highest existing version across the program's tag families
+          # (solana, svm and per-commit), as the repositories did before
+          # sharing this workflow: a `commit` release of a program at 1.4.0
+          # continues from 1.4.0, not from 0.0.0. First release starts at 0.0.0.
+          VERSION="$(git tag -l "release/${RELEASE_TAG}@*" "release/${RELEASE_TAG}-svm@*" "release/${RELEASE_TAG}-???????@*" \
+            | sed 's|.*@||' | sort -V | tail -n1)"
           VERSION="${VERSION:-0.0.0}"
           IFS=. read -r MAJOR MINOR PATCH <<< "$VERSION"
           case "$BUMP" in

@@ -52,7 +52,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.git_ref || github.sha }}
-          persist-credentials: false
+          # On a push, dorny/paths-filter fetches the previous commit with
+          # git, which a private repository refuses without credentials. This
+          # job holds nothing but a read-only token and runs no repository
+          # code beyond jq, so keeping the credentials is safe here.
+          persist-credentials: true
 
       - name: Checkout shared actions
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
