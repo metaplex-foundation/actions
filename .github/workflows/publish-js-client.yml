@@ -159,7 +159,18 @@ jobs:
         working-directory: ./${{ inputs.client_dir }}
         env:
           TAG: ${{ inputs.tag }}
-        run: npm publish --access public --tag "$TAG" --provenance
+        run: |
+          set -euo pipefail
+          NAME="$(npm pkg get name | tr -d '"')"
+          VERSION="$(npm pkg get version | tr -d '"')"
+          # A rerun after a run that published the package but failed to
+          # open the release pull request: npm would refuse the version, so
+          # skip the publish and let the pull request be created.
+          if npm view "${NAME}@${VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::${NAME}@${VERSION} is already on npm; only the release pull request is created"
+            exit 0
+          fi
+          npm publish --access public --tag "$TAG" --provenance
 
       - name: Clean up
         shell: bash

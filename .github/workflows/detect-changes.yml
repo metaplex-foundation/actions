@@ -53,10 +53,11 @@ jobs:
         with:
           ref: ${{ inputs.git_ref || github.sha }}
           # On a push, dorny/paths-filter fetches the previous commit with
-          # git, which a private repository refuses without credentials. This
-          # job holds nothing but a read-only token and runs no repository
-          # code beyond jq, so keeping the credentials is safe here.
-          persist-credentials: true
+          # git, which a private repository refuses without credentials. On a
+          # pull request it lists the files through the API instead, so the
+          # read-only token is not left in the checkout a fork's filters run
+          # against.
+          persist-credentials: ${{ github.event_name != 'pull_request' }}
 
       - name: Checkout shared actions
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

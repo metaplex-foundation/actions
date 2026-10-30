@@ -134,17 +134,39 @@ jobs:
           fi
 
           cargo login "$CRATES_TOKEN"
-          cargo release "$BUMP" "${OPTIONS[@]}"
-
-          # cargo release commits the bump; undo the commit and keep the
-          # working tree change so create-pull-request can commit it on a
-          # release branch instead of pushing to the base branch.
-          if [ "$DRY_RUN" = "false" ]; then
-            git reset --soft HEAD~1
+          START="$(git rev-parse HEAD)"
+          crate_info() {
+            NAME="$(grep -E '^name\s*=' Cargo.toml | head -n1 | awk -F '"' '{print $2}')"
+            VER="$(grep -E '^version\s*=' Cargo.toml | head -n1 | awk -F '"' '{print $2}')"
+          }
+          if cargo release "$BUMP" "${OPTIONS[@]}"; then
+            :
+          else
+            # A rerun after a run that published the crate but failed to
+            # open the release pull request: cargo release commits the same
+            # bump again and crates.io refuses the version. The bump commit
+            # exists and the version is on crates.io, so only the pull
+            # request is still missing.
+            crate_info
+            if [ "$DRY_RUN" = "false" ] && [ "$(git rev-parse HEAD)" != "$START" ] \
+               && curl -sfS -A "metaplex-foundation/actions publish-rust-client" \
+                    "https://crates.io/api/v1/crates/${NAME}/${VER}" >/dev/null; then
+              echo "::notice::${NAME} ${VER} is already on crates.io; only the release pull request is created"
+            else
+              exit 1
+            fi
           fi
 
-          NAME="$(grep -E '^name\s*=' Cargo.toml | head -n1 | awk -F '"' '{print $2}')"
-          VER="$(grep -E '^version\s*=' Cargo.toml | head -n1 | awk -F '"' '{print $2}')"
+          # cargo release commits the bump; undo the commit(s) and keep the
+          # working tree change so create-pull-request can commit it on a
+          # release branch instead of pushing to the base branch. Reset to
+          # the recorded commit, not HEAD~1: cargo release may have made no
+          # commit (nothing to bump) or more than one.
+          if [ "$DRY_RUN" = "false" ]; then
+            git reset --soft "$START"
+          fi
+
+          crate_info
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
           echo "version=$VER" >> "$GITHUB_OUTPUT"
 

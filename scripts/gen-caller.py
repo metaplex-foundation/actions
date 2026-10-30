@@ -182,14 +182,18 @@ def release_tags():
 SHA = "${{ needs.check_tag.outputs.sha }}"
 
 
-def check_tag(comment, per_program, releases=True):
+def check_tag(comment, per_program, releases=True, reject=True):
     """The check_tag job: classifies git_ref as `release` or `ref` and
     resolves it to one commit (`sha`) that every later job checks out.
 
     Only this repository's own release tags count as `release`; any other
     release/*@* ref is an error rather than a reason to skip build and test.
-    With `per_program` the tag must also belong to the selected program; with
-    `releases=False` (create-release) no release tag is accepted at all.
+    With `per_program` the tag must also belong to the selected program. With
+    `releases=False` no ref is a release: create-release (`reject=True`)
+    refuses a release/*@* ref outright and emits no `type` output, while a
+    repository that cuts no program releases (`reject=False`) builds and
+    tests every ref, release-looking or not, since no shared workflow has
+    tested what such a tag points at.
 
     Resolving once matters: an unqualified name is resolved by each
     checkout separately, so a branch that moves between build and publish
@@ -201,10 +205,14 @@ def check_tag(comment, per_program, releases=True):
         "    name: Check tag",
         "    runs-on: ubuntu-latest",
         "    permissions:",
-        "      # Confirms the release tag exists and resolves the ref to a commit.",
+        ("      # Confirms the release tag exists and resolves the ref to a commit."
+         if releases else "      # Resolves the ref to a commit."),
         "      contents: read",
         "    outputs:",
-        "      type: ${{ steps.set_type.outputs.type }}",
+    ]
+    if releases or not reject:
+        head.append("      type: ${{ steps.set_type.outputs.type }}")
+    head += [
         "      sha: ${{ steps.set_type.outputs.sha }}",
         "    steps:",
         "      - name: Check tag",
@@ -216,14 +224,15 @@ def check_tag(comment, per_program, releases=True):
     if per_program:
         head.append("          PROGRAM: ${{ inputs.program }}")
     head += ["        run: |", f"          # {comment}"]
-    if not releases:
+    if not releases and reject:
         body = [
             '          if [[ "$GIT_REF" == release/*@* ]]; then',
             '            echo "::error::a release is cut from a commit or branch, not from the release tag \'$GIT_REF\'"',
             '            exit 1',
             '          fi',
-            '          TYPE=ref',
-        ] + tag_exists()
+        ] + tag_exists(releases=False, type_output=False)
+    elif not releases:
+        body = ['          TYPE=ref'] + tag_exists(releases=False)
     elif per_program:
         body = ['          case "$PROGRAM" in']
         for prog, tag in tags.items():
@@ -254,29 +263,38 @@ def check_tag(comment, per_program, releases=True):
     return "\n".join(head + body) + "\n"
 
 
-def tag_exists():
+def tag_exists(releases=True, type_output=True):
     """A branch named like a release tag must not skip build and test, and
-    every job downstream gets the same commit."""
-    return [
-        '          if [ "$TYPE" = release ]; then',
-        '            # Only an existing tag skips build and test; a branch named like one does not.',
-        '            OBJ="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GIT_REF}" --jq \'.object.type + " " + .object.sha\')" \\',
-        '              || { echo "::error::\'$GIT_REF\' is not an existing tag of this repository"; exit 1; }',
-        '            read -r OBJ_TYPE SHA <<< "$OBJ"',
-        '            if [ "$OBJ_TYPE" = tag ]; then',
-        '              # Annotated tag: follow it to the commit.',
-        '              SHA="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${SHA}" --jq .object.sha)"',
-        '            fi',
-        '          elif [ -z "$GIT_REF" ]; then',
+    every job downstream gets the same commit. Without `releases` no ref is
+    a tag to look up, so only the commit resolution is emitted."""
+    lines = []
+    if releases:
+        lines += [
+            '          if [ "$TYPE" = release ]; then',
+            '            # Only an existing tag skips build and test; a branch named like one does not.',
+            '            OBJ="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GIT_REF}" --jq \'.object.type + " " + .object.sha\')" \\',
+            '              || { echo "::error::\'$GIT_REF\' is not an existing tag of this repository"; exit 1; }',
+            '            read -r OBJ_TYPE SHA <<< "$OBJ"',
+            '            if [ "$OBJ_TYPE" = tag ]; then',
+            '              # Annotated tag: follow it to the commit.',
+            '              SHA="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${SHA}" --jq .object.sha)"',
+            '            fi',
+            '          elif [ -z "$GIT_REF" ]; then',
+        ]
+    else:
+        lines += ['          if [ -z "$GIT_REF" ]; then']
+    lines += [
         '            SHA="$GITHUB_SHA"',
         '          else',
         '            SHA="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GIT_REF}" --jq .sha)" \\',
         '              || { echo "::error::\'$GIT_REF\' is not a commit, branch or tag of this repository"; exit 1; }',
         '          fi',
-        '          echo "type=$TYPE" >> "$GITHUB_OUTPUT"',
-        '          echo "sha=$SHA" >> "$GITHUB_OUTPUT"',
-        '          echo "$GIT_REF -> $SHA ($TYPE)"',
     ]
+    if type_output:
+        lines.append('          echo "type=$TYPE" >> "$GITHUB_OUTPUT"')
+    lines.append('          echo "sha=$SHA" >> "$GITHUB_OUTPUT"')
+    lines.append('          echo "$GIT_REF -> $SHA ($TYPE)"' if type_output else '          echo "$GIT_REF -> $SHA"')
+    return lines
 
 
 def concurrency(group, comment):
@@ -318,7 +336,11 @@ def gen_publish_js():
         "",
         concurrency("publish-js-client", "One JS publish at a time: each bumps the version and opens a release PR."),
         "jobs:",
-        check_tag("A program release tag was already built and tested when it was cut.", per_program=False),
+        (check_tag("A program release tag was already built and tested when it was cut.", per_program=False)
+         if s.get("create_release", True) else
+         check_tag("This repository cuts no program releases, so no tag has been\n"
+                   "          # tested by CI: every ref is built and tested before publishing.",
+                   per_program=False, releases=False, reject=False)),
     ]
     out.append(job("build_programs", "Programs", "build-programs", needs="check_tag",
                    cond="needs.check_tag.outputs.type == 'ref'", perms=["contents: read"],
