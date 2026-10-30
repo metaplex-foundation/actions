@@ -72,7 +72,9 @@ jobs:
       - name: Git checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.git_ref || github.ref }}
+          # The commit, not the branch: the build and test jobs before this
+          # one checked out github.sha, and the branch may have moved since.
+          ref: ${{ inputs.git_ref || github.sha }}
           persist-credentials: false
 
       - name: Checkout shared actions
