@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate a program repository's thin caller workflows for the shared CI.
 
-Usage: python3 -I gen_ci.py <spec.json> <repo-dir>
+Usage: python3 -I scripts/gen-caller.py <spec.json> <repo-dir>
 
 Writes .github/programs.json and .github/workflows/{main,publish-js-client,
 publish-rust-client,release-js-client,release-rust-client,create-release,
@@ -9,6 +9,7 @@ deploy-program,verify-program}.yml according to the spec. Existing files at
 those paths are overwritten; nothing else is touched.
 """
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -17,7 +18,10 @@ SPEC = {}
 
 
 def ref(name):
-    return f"{WF}/{name}.yml@{SPEC['actions_sha']} # {SPEC.get('actions_tag', 'v2.0.0')}"
+    sha = SPEC["actions_sha"]
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        sys.exit(f"actions_sha must be a full 40-character commit SHA, got {sha!r}")
+    return f"{WF}/{name}.yml@{sha} # {SPEC.get('actions_tag', 'v2.0.0')}"
 
 
 def yaml_list(items):
@@ -186,7 +190,9 @@ def check_tag(comment, per_program):
         "  check_tag:",
         "    name: Check tag",
         "    runs-on: ubuntu-latest",
-        "    permissions: {}",
+        "    permissions:",
+        "      # Confirms the release tag exists.",
+        "      contents: read",
         "    outputs:",
         "      type: ${{ steps.set_type.outputs.type }}",
         "    steps:",
@@ -194,6 +200,7 @@ def check_tag(comment, per_program):
         "        id: set_type",
         "        env:",
         "          GIT_REF: ${{ inputs.git_ref }}",
+        "          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
     ]
     if per_program:
         head.append("          PROGRAM: ${{ inputs.program }}")
@@ -210,22 +217,34 @@ def check_tag(comment, per_program):
             '              echo "::error::\'$GIT_REF\' is not a release tag of $PROGRAM (expected release/${TAG}@<version>)"',
             '              exit 1',
             '            fi',
-            '            echo "type=release" >> "$GITHUB_OUTPUT"',
+            '            TYPE=release',
             '          else',
-            '            echo "type=ref" >> "$GITHUB_OUTPUT"',
+            '            TYPE=ref',
             '          fi',
-        ]
+        ] + tag_exists()
     else:
         patterns = "|".join(f"release/{t}@*" for t in dict.fromkeys(tags.values()))
         expected = ", ".join(f"release/{t}@<version>" for t in dict.fromkeys(tags.values()))
         body = [
             '          case "$GIT_REF" in',
-            f'            {patterns}) echo "type=release" >> "$GITHUB_OUTPUT" ;;',
+            f'            {patterns}) TYPE=release ;;',
             f'            release/*@*) echo "::error::\'$GIT_REF\' is not a release tag of this repository (expected {expected})"; exit 1 ;;',
-            '            *) echo "type=ref" >> "$GITHUB_OUTPUT" ;;',
+            '            *) TYPE=ref ;;',
             '          esac',
-        ]
+        ] + tag_exists()
     return "\n".join(head + body) + "\n"
+
+
+def tag_exists():
+    """A branch named like a release tag must not skip build and test."""
+    return [
+        '          if [ "$TYPE" = release ]; then',
+        '            # Only an existing tag skips build and test; a branch named like one does not.',
+        '            gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GIT_REF}" --silent \\',
+        '              || { echo "::error::\'$GIT_REF\' is not an existing tag of this repository"; exit 1; }',
+        '          fi',
+        '          echo "type=$TYPE" >> "$GITHUB_OUTPUT"',
+    ]
 
 
 def concurrency(group, comment):
@@ -474,6 +493,9 @@ def gen_create_release():
     needs = [n for n in ["test_js", "test_rust", "test_programs"]
              if n != "test_js" or s.get("js_client", True)]
     needs = [n for n in needs if n != "test_rust" or rust_client_gates()]
+    # create-release downloads the build artifact, so it waits for the build
+    # even when no test job carries that dependency.
+    needs = ["build_programs"] + needs
     out.append(job("create_release", "Program", "create-release", needs=needs, perms=["contents: write"],
                    with_pairs=[("program", "${{ inputs.program }}"), ("bump", "${{ inputs.bump }}"),
                                ("type", "${{ inputs.type }}" if types else ""),
@@ -489,6 +511,9 @@ RPC_MAP = [
 
 
 def rpc_expr(clusters):
+    unknown = [c for c in clusters if c not in dict(RPC_MAP)]
+    if unknown:
+        sys.exit(f"deploy.clusters {unknown} have no RPC secret in RPC_MAP; add them there first")
     parts = [f"inputs.cluster == '{c}' && secrets.{sec}" for c, sec in RPC_MAP if c in clusters]
     if len(parts) == 1:
         return "${{ " + parts[0].split(" && ")[1] + " }}"

@@ -34,9 +34,11 @@ runs:
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ./node_modules/
-        key: ${{ runner.os }}-node-${{ hashFiles('pnpm-lock.yaml', 'package-lock.json', 'yarn.lock') }}
+        # Native modules are built per Node ABI, so a matrix of Node
+        # versions must not share one node_modules cache.
+        key: ${{ runner.os }}-node-${{ inputs.version }}-${{ hashFiles('pnpm-lock.yaml', 'package-lock.json', 'yarn.lock') }}
         restore-keys: |
-          ${{ runner.os }}-node
+          ${{ runner.os }}-node-${{ inputs.version }}-
 
     - name: Install Node.js dependencies
       if: inputs.dependencies == 'true'

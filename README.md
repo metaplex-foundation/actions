@@ -46,7 +46,7 @@ The reference caller lives in
 
 ### programs.json
 
-`deploy-program` and `verify-program` read `programs.json` from the revision the workflow was dispatched from (`github.sha`), not from `git_ref`, so older release tags deploy with today's cluster configuration. `.github/.env` is still read from `git_ref`, because toolchain pins belong with the code they build.
+Every shared workflow that takes a `git_ref` (`build-programs`, `test-programs`, `create-release`, `deploy-program`, `verify-program`) reads `programs.json` from the revision the run is for (`github.sha`), not from `git_ref`, so a release tag cut before the file existed still builds and deploys with today's cluster configuration. `.github/.env` is read from `git_ref`, because toolchain pins belong with the code they build; the one exception is the host tools of `deploy-program` and `verify-program` (`DEPLOY_SOLANA_VERSION`, `SOLANA_VERIFY_VERSION`, `SOLANA_VERIFY_RUST_VERSION`), which come from `github.sha` so that an old release can still be verified with a verifier that compiles today.
 
 ```json
 {

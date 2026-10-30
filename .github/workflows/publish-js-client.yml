@@ -78,7 +78,9 @@ jobs:
       - name: Git checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.git_ref || github.ref }}
+          # The commit, not the branch: the build and test jobs before this
+          # one checked out github.sha, and the branch may have moved since.
+          ref: ${{ inputs.git_ref || github.sha }}
           persist-credentials: false
 
       - name: Checkout shared actions
@@ -104,7 +106,9 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - name: Install npm with trusted publishing support
-        run: npm install -g "npm@>=11.5.1"
+        # Trusted publishing needs npm 11.5.1 or newer; pinned because this
+        # job holds id-token: write.
+        run: npm install -g npm@11.21.1
 
       - name: Install client dependencies
         uses: ./.mpl-actions/install-node-dependencies
@@ -116,6 +120,19 @@ jobs:
       - name: Build
         working-directory: ./${{ inputs.client_dir }}
         run: pnpm build
+
+      - name: Check release inputs
+        env:
+          BUMP: ${{ inputs.bump }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # A pre-release published under `latest` would become what a plain
+          # `npm install` picks up.
+          if [[ "$BUMP" == pre* ]] && [ "$TAG" = "latest" ]; then
+            echo "::error::a $BUMP bump needs a dist-tag other than 'latest' (for example 'next' or 'beta')"
+            exit 1
+          fi
 
       - name: Bump version
         id: bump
@@ -173,7 +190,9 @@ jobs:
       - name: Git checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.git_ref || github.ref }}
+          # The commit, not the branch: the build and test jobs before this
+          # one checked out github.sha, and the branch may have moved since.
+          ref: ${{ inputs.git_ref || github.sha }}
           persist-credentials: false
 
       - name: Checkout shared actions
@@ -216,4 +235,6 @@ jobs:
           else
             VERCEL="npx --yes vercel"
           fi
-          echo "url=$($VERCEL deploy --prod --token="$VERCEL_TOKEN")" | tee "$GITHUB_OUTPUT"
+          url="$($VERCEL deploy --prod --token="$VERCEL_TOKEN")"
+          echo "deployed to $url"
+          echo "url=$url" >> "$GITHUB_OUTPUT"

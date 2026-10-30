@@ -103,15 +103,28 @@ jobs:
           # Deploy targets come from the revision this workflow was dispatched
           # from, not from git_ref: a release tag cut before programs.json
           # existed, or before a cluster was added to it, must still work.
-          # Toolchain pins (.github/.env) still come from git_ref, with the code.
+          # Toolchain pins (.github/.env) come from git_ref, with the code,
+          # except the host tool pins loaded below.
           ref: ${{ github.sha }}
-          sparse-checkout: .github/programs.json
+          sparse-checkout: |
+            .github/programs.json
+            .github/.env
           sparse-checkout-cone-mode: false
           path: .mpl-caller
           persist-credentials: false
 
       - name: Load environment variables
         uses: ./.mpl-actions/load-env
+
+      - name: Load host tool pins from the dispatched revision
+        uses: ./.mpl-actions/load-env
+        with:
+          # The CLI that talks to the cluster and the toolchain that compiles
+          # solana-verify are host tools: an old release tag with an old
+          # RUST_VERSION still needs a verifier that compiles today. Build
+          # image pins (SOLANA_VERIFY_BUILD_VERSION) stay with the code.
+          file: .mpl-caller/.github/.env
+          keys: DEPLOY_SOLANA_VERSION SOLANA_VERIFY_VERSION SOLANA_VERIFY_RUST_VERSION
 
       - name: Program info
         id: program

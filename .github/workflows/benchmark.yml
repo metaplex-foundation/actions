@@ -102,12 +102,6 @@ jobs:
         working-directory: ./${{ inputs.client_dir }}
         run: pnpm bench
 
-      - name: Download previous benchmark data
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ./cache
-          key: ${{ runner.os }}-benchmark
-
       - name: Check for the benchmark data branch
         id: pages
         env:
@@ -146,7 +140,9 @@ jobs:
           tool: customSmallerIsBetter
           output-file-path: ./${{ inputs.client_dir }}/output.json
           summary-always: true
-          comment-always: true
+          # The token is read-only on PRs from forks; the job summary is the
+          # fallback there.
+          comment-always: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
           save-data-file: false
           fail-on-alert: true
           github-token: ${{ secrets.GITHUB_TOKEN }}

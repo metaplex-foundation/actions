@@ -63,12 +63,20 @@ jobs:
               exit 1
             fi
             TAG="${NAME}@v${VERSION}"
+            # A rerun after the tag was pushed but the release failed must
+            # still create the release; a tag that points elsewhere is a
+            # real conflict.
             if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
-              echo "::notice::$TAG already exists, skipping"
-              continue
+              git fetch --depth 1 origin "refs/tags/$TAG:refs/tags/$TAG"
+              if [ "$(git rev-parse "$TAG^{commit}")" != "$(git rev-parse HEAD)" ]; then
+                echo "::error::$TAG already exists and points at another commit"
+                exit 1
+              fi
+              echo "::notice::$TAG already exists at this commit, skipping tag creation"
+            else
+              git tag "$TAG"
+              git push origin "$TAG"
             fi
-            git tag "$TAG"
-            git push origin "$TAG"
             released+=("$TAG")
           done
           if [ "${#released[@]}" -eq 0 ]; then
@@ -86,6 +94,13 @@ jobs:
             const { owner, repo } = context.repo;
             for (const tag of JSON.parse(process.env.TAGS)) {
               const [name, version] = tag.split('@v');
+              try {
+                await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+                core.info(`${tag} already has a release, skipping`);
+                continue;
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
               await github.rest.repos.createRelease({
                 owner, repo, tag_name: tag, name: `${name} v${version}`, generate_release_notes: true,
               });

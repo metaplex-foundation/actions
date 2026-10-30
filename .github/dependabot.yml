@@ -1,7 +1,9 @@
 version: 2
 updates:
   - package-ecosystem: github-actions
-    directory: /
+    # The composite actions live in top-level directories, not only under
+    # .github/workflows.
+    directories: ["/", "/*"]
     schedule:
       interval: weekly
     groups:

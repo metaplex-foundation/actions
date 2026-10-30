@@ -80,6 +80,18 @@ jobs:
           path: .mpl-actions
           persist-credentials: false
 
+      - name: Checkout program descriptors
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # programs.json describes the current repository layout and is read
+          # from the revision this run is for, not from git_ref: a release tag
+          # cut before the file existed must still build.
+          ref: ${{ github.sha }}
+          sparse-checkout: .github/programs.json
+          sparse-checkout-cone-mode: false
+          path: .mpl-caller
+          persist-credentials: false
+
       - name: Free disk space
         if: inputs.free_disk_space
         shell: bash
@@ -98,6 +110,7 @@ jobs:
         uses: ./.mpl-actions/program-info
         with:
           name: ${{ matrix.program }}
+          file: .mpl-caller/.github/programs.json
 
       - name: Install apt packages
         if: inputs.apt_packages != ''
