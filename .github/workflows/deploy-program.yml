@@ -212,6 +212,14 @@ jobs:
             fi
             # Direct mainnet-beta deploys are verified right after deploying.
             if [ "$TYPE" = "direct" ] && [ "$CLUSTER" = "mainnet-beta" ]; then echo "verify=true"; else echo "verify=false"; fi
+            # A buffer-only deploy leaves the upgrade proposal to the
+            # operator; export the PDA write for them to bundle with it, on
+            # the clusters where OtterSec verification exists.
+            if [ "$TYPE" = "squads-buffer" ] && { [ "$CLUSTER" = "devnet" ] || [ "$CLUSTER" = "mainnet-beta" ]; }; then
+              echo "export_pda=true"
+            else
+              echo "export_pda=false"
+            fi
           } >> "$GITHUB_OUTPUT"
 
       - name: Install Rust
@@ -226,7 +234,7 @@ jobs:
           cache: ${{ inputs.cache }}
 
       - name: Install solana-verify
-        if: ${{ !inputs.dry_run && (steps.plan.outputs.bundled == 'true' || steps.plan.outputs.verify == 'true') }}
+        if: ${{ !inputs.dry_run && (steps.plan.outputs.bundled == 'true' || steps.plan.outputs.export_pda == 'true' || steps.plan.outputs.verify == 'true') }}
         uses: ./.mpl-actions/install-solana-verify
         with:
           version: ${{ steps.plan.outputs.verify_version }}
@@ -349,9 +357,11 @@ jobs:
       # Squads-deployed clusters need the vault to sign both the program
       # upgrade and the verified-build PDA write. Export the PDA-write
       # instruction first so a failed export aborts before writing an orphan
-      # buffer.
+      # buffer. For a buffer-only deploy the transaction goes to the job
+      # summary (the action appends it) for the operator to add to the
+      # upgrade proposal they create by hand.
       - name: Export verified-build PDA transaction
-        if: ${{ !inputs.dry_run && steps.plan.outputs.bundled == 'true' }}
+        if: ${{ !inputs.dry_run && (steps.plan.outputs.bundled == 'true' || steps.plan.outputs.export_pda == 'true') }}
         uses: ./.mpl-actions/verify-program
         with:
           mode: export-pda-tx

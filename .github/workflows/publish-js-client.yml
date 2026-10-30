@@ -165,10 +165,18 @@ jobs:
           VERSION="$(npm pkg get version | tr -d '"')"
           # A rerun after a run that published the package but failed to
           # open the release pull request: npm would refuse the version, so
-          # skip the publish and let the pull request be created.
-          if npm view "${NAME}@${VERSION}" version >/dev/null 2>&1; then
-            echo "::notice::${NAME}@${VERSION} is already on npm; only the release pull request is created"
-            exit 0
+          # skip the publish and let the pull request be created. Only when
+          # the registry holds this very tarball, though: the same version
+          # computed from another commit must not get a release PR for code
+          # that was never published.
+          if PUBLISHED="$(npm view "${NAME}@${VERSION}" dist.integrity 2>/dev/null)" && [ -n "$PUBLISHED" ]; then
+            LOCAL="$(npm pack --dry-run --json 2>/dev/null | jq -r '.[0].integrity')"
+            if [ "$PUBLISHED" = "$LOCAL" ]; then
+              echo "::notice::${NAME}@${VERSION} is already on npm with this content; only the release pull request is created"
+              exit 0
+            fi
+            echo "::error::${NAME}@${VERSION} is already on npm with different content (registry ${PUBLISHED}, this build ${LOCAL}); bump from the published source or pick another version"
+            exit 1
           fi
           npm publish --access public --tag "$TAG" --provenance
 

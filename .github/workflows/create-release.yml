@@ -147,5 +147,8 @@ jobs:
           body: Release ${{ steps.version.outputs.tag }}
           artifacts: programs/.bin/${{ steps.program.outputs.library }}.so
           artifactContentType: application/octet-stream
+          # A release without its binary cannot be deployed from; fail here
+          # rather than leave a tag whose asset download fails later.
+          artifactErrorsFailBuild: true
           draft: false
           prerelease: false

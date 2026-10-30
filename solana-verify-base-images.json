@@ -3,6 +3,7 @@
   "images": {
     "3.1.14": "solanafoundation/solana-verifiable-build@sha256:f6b78c98ddb1774af9cf1b5ca00ccff4dac002eded106b4d44560c2c6be4188d",
     "2.3.5": "solanafoundation/solana-verifiable-build@sha256:c4d81ef3f4d540706988bca249ca8d827ab4c96c567f92c49d0d4a9a7a9337de",
+    "2.2.1": "solanafoundation/solana-verifiable-build@sha256:a20e03cbd0b96bf3d4084e956cf6d7b47389c7a35508628a82296c3376518be9",
     "1.18.26": "solanafoundation/solana-verifiable-build@sha256:ec2e20e1f80607150a71e4c72adfe64be24347ed0b4fb741c32b34eaf7549a25",
     "1.18.22": "solanafoundation/solana-verifiable-build@sha256:7804e1076ef24d4840f4fec24c88b5be8008e947cad2705516666a9f24b39de3",
     "1.18.21": "solanafoundation/solana-verifiable-build@sha256:d72ae60cb3890bcf444ab9f626e6db380235a2c0ef1e8aee1bc530fe3633c4be",

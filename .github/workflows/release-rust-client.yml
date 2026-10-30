@@ -74,7 +74,7 @@ jobs:
               echo "$manifest unchanged in the merge commit, skipping"
               continue
             fi
-            if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*$'; then
+            if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z]+)*$'; then
               echo "::error::invalid version '$VERSION' in $manifest"
               exit 1
             fi

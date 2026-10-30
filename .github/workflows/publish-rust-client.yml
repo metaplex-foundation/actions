@@ -139,22 +139,33 @@ jobs:
             NAME="$(grep -E '^name\s*=' Cargo.toml | head -n1 | awk -F '"' '{print $2}')"
             VER="$(grep -E '^version\s*=' Cargo.toml | head -n1 | awk -F '"' '{print $2}')"
           }
-          if cargo release "$BUMP" "${OPTIONS[@]}"; then
-            :
-          else
-            # A rerun after a run that published the crate but failed to
-            # open the release pull request: cargo release commits the same
-            # bump again and crates.io refuses the version. The bump commit
-            # exists and the version is on crates.io, so only the pull
-            # request is still missing.
+          PUBLISH=true
+          if [ "$DRY_RUN" = "false" ]; then
+            # Bump the manifest alone first to learn the next version. If it
+            # is already on crates.io, this is a rerun after a run that
+            # published but failed to open the release pull request (cargo
+            # release itself would stop before committing): keep the bump in
+            # the tree and skip the publish, but only when the crate on
+            # crates.io is byte for byte what this commit packages.
+            cargo release version "$BUMP" --allow-branch HEAD --no-confirm --execute
             crate_info
-            if [ "$DRY_RUN" = "false" ] && [ "$(git rev-parse HEAD)" != "$START" ] \
-               && curl -sfS -A "metaplex-foundation/actions publish-rust-client" \
-                    "https://crates.io/api/v1/crates/${NAME}/${VER}" >/dev/null; then
-              echo "::notice::${NAME} ${VER} is already on crates.io; only the release pull request is created"
+            if REMOTE="$(curl -sfS -A "metaplex-foundation/actions publish-rust-client" \
+                 "https://crates.io/api/v1/crates/${NAME}/${VER}" | jq -r '.version.checksum')" && [ -n "$REMOTE" ]; then
+              cargo package --no-verify --allow-dirty
+              LOCAL="$(sha256sum "$(cargo metadata --no-deps --format-version 1 | jq -r .target_directory)/package/${NAME}-${VER}.crate" | cut -d' ' -f1)"
+              if [ "$REMOTE" != "$LOCAL" ]; then
+                echo "::error::${NAME} ${VER} is already on crates.io with different content (registry ${REMOTE}, this build ${LOCAL}); bump from the published source or pick another version"
+                exit 1
+              fi
+              echo "::notice::${NAME} ${VER} is already on crates.io with this content; only the release pull request is created"
+              PUBLISH=false
             else
-              exit 1
+              git reset --hard "$START"
             fi
+          fi
+
+          if [ "$PUBLISH" = true ]; then
+            cargo release "$BUMP" "${OPTIONS[@]}"
           fi
 
           # cargo release commits the bump; undo the commit(s) and keep the
