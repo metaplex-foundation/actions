@@ -108,6 +108,26 @@ jobs:
           path: ./cache
           key: ${{ runner.os }}-benchmark
 
+      - name: Check for the benchmark data branch
+        id: pages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # github-action-benchmark keeps its history on gh-pages and fails when
+          # that branch does not exist yet (fresh repos, anything made from the
+          # template). Give it a local empty branch instead: `store` pushes it
+          # and so creates the remote branch; `summary` reports without a baseline.
+          if gh api "repos/${GITHUB_REPOSITORY}/branches/gh-pages" --silent 2>/dev/null; then
+            echo "skip_fetch=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No gh-pages branch yet; benchmark history starts with this run"
+            tree=$(git mktree </dev/null)
+            commit=$(git -c user.name=github-actions -c user.email=github-actions@github.com \
+              commit-tree "$tree" -m "Initialize benchmark data branch")
+            git branch gh-pages "$commit"
+            echo "skip_fetch=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Store benchmark result
         if: inputs.mode != 'summary'
         uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc # v1.22.2
@@ -117,6 +137,7 @@ jobs:
           fail-on-alert: true
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: true
+          skip-fetch-gh-pages: ${{ steps.pages.outputs.skip_fetch == 'true' }}
 
       - name: Summarize benchmark result
         if: inputs.mode == 'summary'
@@ -129,3 +150,4 @@ jobs:
           save-data-file: false
           fail-on-alert: true
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          skip-fetch-gh-pages: ${{ steps.pages.outputs.skip_fetch == 'true' }}
