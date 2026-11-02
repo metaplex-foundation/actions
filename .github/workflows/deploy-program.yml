@@ -361,7 +361,12 @@ jobs:
       # summary (the action appends it) for the operator to add to the
       # upgrade proposal they create by hand.
       - name: Export verified-build PDA transaction
+        id: export_pda
         if: ${{ !inputs.dry_run && (steps.plan.outputs.bundled == 'true' || steps.plan.outputs.export_pda == 'true') }}
+        # A bundled proposal cannot go ahead without the PDA write. For a
+        # buffer-only deploy the export is a convenience: a build version
+        # with no pinned verifier image must not stop the buffer being written.
+        continue-on-error: ${{ steps.plan.outputs.bundled != 'true' }}
         uses: ./.mpl-actions/verify-program
         with:
           mode: export-pda-tx
@@ -376,6 +381,11 @@ jobs:
           repo-visibility: ${{ steps.plan.outputs.repo_visibility }}
           submit-remote: false
           output-file: verify-pda-tx.b58
+
+      - name: Report skipped PDA export
+        if: ${{ steps.export_pda.outcome == 'failure' }}
+        shell: bash
+        run: echo "::warning::Could not export the verified-build PDA transaction; the buffer is still written. Export it by hand with solana-verify export-pda-tx and add it to the upgrade proposal."
 
       - name: Write Squads buffer
         if: ${{ !inputs.dry_run && steps.plan.outputs.squads == 'true' }}

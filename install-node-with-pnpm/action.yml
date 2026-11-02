@@ -29,16 +29,24 @@ runs:
     # Inlined rather than calling install-node-dependencies by tag, so a
     # checkout of this repository at one commit resolves every step from
     # that same commit.
+    - name: Runner image
+      id: image
+      if: inputs.dependencies == 'true' && inputs.cache == 'true'
+      shell: bash
+      # ImageOS (e.g. ubuntu24) separates hosted runner images, whose glibc
+      # differs; self-hosted runners fall back to the OS release.
+      run: echo "id=${ImageOS:-$(. /etc/os-release 2>/dev/null && echo "${ID}${VERSION_ID}" || echo unknown)}" >> "$GITHUB_OUTPUT"
+
     - name: Cache Node.js dependencies
       if: inputs.dependencies == 'true' && inputs.cache == 'true'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ./node_modules/
-        # Native modules are built per Node ABI and CPU, so a matrix of Node
-        # versions or runners must not share one node_modules cache.
-        key: ${{ runner.os }}-${{ runner.arch }}-node-${{ inputs.version }}-${{ hashFiles('pnpm-lock.yaml', 'package-lock.json', 'yarn.lock') }}
+        # Native modules are built per Node ABI, CPU and libc, so a matrix of Node
+        # versions, runners or runner images must not share one node_modules cache.
+        key: ${{ runner.os }}-${{ steps.image.outputs.id }}-${{ runner.arch }}-node-${{ inputs.version }}-${{ hashFiles('pnpm-lock.yaml', 'package-lock.json', 'yarn.lock') }}
         restore-keys: |
-          ${{ runner.os }}-${{ runner.arch }}-node-${{ inputs.version }}-
+          ${{ runner.os }}-${{ steps.image.outputs.id }}-${{ runner.arch }}-node-${{ inputs.version }}-
 
     - name: Install Node.js dependencies
       if: inputs.dependencies == 'true'
