@@ -176,7 +176,9 @@ jobs:
               # Skipping the publish also skips moving the dist-tag, which
               # trusted publishing cannot do; refuse rather than leave the
               # requested tag on another version.
-              CURRENT="$(npm view "$NAME" "dist-tags.${TAG}" 2>/dev/null || true)"
+              # The tag is a literal key: `npm view pkg dist-tags.x.y` would read
+              # a dot in the tag as a path separator.
+              CURRENT="$(npm view "$NAME" dist-tags --json 2>/dev/null | jq -r --arg t "$TAG" '.[$t] // ""' || true)"
               if [ "$CURRENT" != "$VERSION" ]; then
                 echo "::error::${NAME}@${VERSION} is already on npm, but dist-tag '${TAG}' points at '${CURRENT:-nothing}'; run: npm dist-tag add ${NAME}@${VERSION} ${TAG}, then rerun"
                 exit 1

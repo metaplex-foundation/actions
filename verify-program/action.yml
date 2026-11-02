@@ -413,6 +413,9 @@ runs:
           ARGS+=(-- --package "${PACKAGE_NAME}")
         fi
 
+        LOG="$(mktemp)"
+        trap 'rm -f "${LOG}"' EXIT
+
         echo "+ ${ARGS[*]}"
         if [ "${REPO_VISIBILITY}" = "private" ]; then
           if [ -z "${GITHUB_TOKEN}" ]; then
@@ -420,22 +423,21 @@ runs:
             exit 1
           fi
           AUTH_CONFIG=$(mktemp)
-          trap 'rm -f "${AUTH_CONFIG}"' EXIT
+          trap 'rm -f "${AUTH_CONFIG}" "${LOG}"' EXIT
           git config --file "${AUTH_CONFIG}" \
             "url.https://x-access-token:${GITHUB_TOKEN}@github.com/.insteadOf" \
             "https://github.com/"
-          GIT_CONFIG_GLOBAL="${AUTH_CONFIG}" "${ARGS[@]}" 2>&1 | tee verify-from-repo.log
+          GIT_CONFIG_GLOBAL="${AUTH_CONFIG}" "${ARGS[@]}" 2>&1 | tee "${LOG}"
         else
-          "${ARGS[@]}" 2>&1 | tee verify-from-repo.log
+          "${ARGS[@]}" 2>&1 | tee "${LOG}"
         fi
         # solana-verify (0.4.x) prints the mismatch and exits 0 without
-        # uploading the PDA; only its success line proves the hashes matched.
-        if ! grep -q 'Program hash matches' verify-from-repo.log; then
-          rm -f verify-from-repo.log
+        # uploading the PDA. Match its result lines whole, so build output
+        # that merely contains the words cannot pass for a match.
+        if grep -qxF 'Program hashes do not match ❌' "${LOG}" || ! grep -qxF 'Program hash matches ✅' "${LOG}"; then
           echo "::error title=Verified-build hash mismatch::the rebuilt program does not match the on-chain program; no verified-build PDA was written"
           exit 1
         fi
-        rm -f verify-from-repo.log
       shell: bash
 
     - name: Export verified-build PDA transaction
