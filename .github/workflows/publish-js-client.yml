@@ -159,6 +159,7 @@ jobs:
         working-directory: ./${{ inputs.client_dir }}
         env:
           TAG: ${{ inputs.tag }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
         run: |
           set -euo pipefail
           NAME="$(npm pkg get name | tr -d '"')"
@@ -172,13 +173,25 @@ jobs:
           if PUBLISHED="$(npm view "${NAME}@${VERSION}" dist.integrity 2>/dev/null)" && [ -n "$PUBLISHED" ]; then
             LOCAL="$(npm pack --dry-run --json 2>/dev/null | jq -r '.[0].integrity')"
             if [ "$PUBLISHED" = "$LOCAL" ]; then
+              # Skipping the publish also skips moving the dist-tag, which
+              # trusted publishing cannot do; refuse rather than leave the
+              # requested tag on another version.
+              CURRENT="$(npm view "$NAME" "dist-tags.${TAG}" 2>/dev/null || true)"
+              if [ "$CURRENT" != "$VERSION" ]; then
+                echo "::error::${NAME}@${VERSION} is already on npm, but dist-tag '${TAG}' points at '${CURRENT:-nothing}'; run: npm dist-tag add ${NAME}@${VERSION} ${TAG}, then rerun"
+                exit 1
+              fi
               echo "::notice::${NAME}@${VERSION} is already on npm with this content; only the release pull request is created"
               exit 0
             fi
             echo "::error::${NAME}@${VERSION} is already on npm with different content (registry ${PUBLISHED}, this build ${LOCAL}); bump from the published source or pick another version"
             exit 1
           fi
-          npm publish --access public --tag "$TAG" --provenance
+          # npm refuses provenance from a private source repository; trusted
+          # publishing itself works there, without the attestation.
+          PROVENANCE=(--provenance)
+          if [ "$REPO_PRIVATE" = "true" ]; then PROVENANCE=(); fi
+          npm publish --access public --tag "$TAG" "${PROVENANCE[@]}"
 
       - name: Clean up
         shell: bash

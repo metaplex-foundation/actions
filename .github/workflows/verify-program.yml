@@ -210,6 +210,8 @@ jobs:
           solana-version: ${{ steps.plan.outputs.verify_build_version }}
           commit-hash: ${{ steps.commit.outputs.sha }}
           repo-visibility: ${{ steps.plan.outputs.repo_visibility }}
+          # OtterSec has no devnet verifier: write the PDA, skip the remote job.
+          submit-remote: ${{ inputs.cluster == 'mainnet-beta' && steps.plan.outputs.repo_visibility == 'public' }}
 
       - name: Clean up signer files
         if: always()

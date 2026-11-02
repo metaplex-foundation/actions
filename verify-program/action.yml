@@ -424,10 +424,18 @@ runs:
           git config --file "${AUTH_CONFIG}" \
             "url.https://x-access-token:${GITHUB_TOKEN}@github.com/.insteadOf" \
             "https://github.com/"
-          GIT_CONFIG_GLOBAL="${AUTH_CONFIG}" "${ARGS[@]}"
+          GIT_CONFIG_GLOBAL="${AUTH_CONFIG}" "${ARGS[@]}" 2>&1 | tee verify-from-repo.log
         else
-          "${ARGS[@]}"
+          "${ARGS[@]}" 2>&1 | tee verify-from-repo.log
         fi
+        # solana-verify (0.4.x) prints the mismatch and exits 0 without
+        # uploading the PDA; only its success line proves the hashes matched.
+        if ! grep -q 'Program hash matches' verify-from-repo.log; then
+          rm -f verify-from-repo.log
+          echo "::error title=Verified-build hash mismatch::the rebuilt program does not match the on-chain program; no verified-build PDA was written"
+          exit 1
+        fi
+        rm -f verify-from-repo.log
       shell: bash
 
     - name: Export verified-build PDA transaction
