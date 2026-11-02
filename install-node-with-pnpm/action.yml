@@ -18,17 +18,37 @@ runs:
   using: "composite"
   steps:
     - name: Install pnpm
-      uses: pnpm/action-setup@v4
+      uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 
     - name: Setup Node.js
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
         node-version: ${{ inputs.version }}
         cache: "pnpm"
 
+    # Inlined rather than calling install-node-dependencies by tag, so a
+    # checkout of this repository at one commit resolves every step from
+    # that same commit.
+    - name: Runner image
+      id: image
+      if: inputs.dependencies == 'true' && inputs.cache == 'true'
+      shell: bash
+      # ImageOS (e.g. ubuntu24) separates hosted runner images, whose glibc
+      # differs; self-hosted runners fall back to the OS release.
+      run: echo "id=${ImageOS:-$(. /etc/os-release 2>/dev/null && echo "${ID}${VERSION_ID}" || echo unknown)}" >> "$GITHUB_OUTPUT"
+
+    - name: Cache Node.js dependencies
+      if: inputs.dependencies == 'true' && inputs.cache == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ./node_modules/
+        # Native modules are built per Node ABI, CPU and libc, so a matrix of Node
+        # versions, runners or runner images must not share one node_modules cache.
+        key: ${{ runner.os }}-${{ steps.image.outputs.id }}-${{ runner.arch }}-node-${{ inputs.version }}-${{ hashFiles('pnpm-lock.yaml', 'package-lock.json', 'yarn.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ steps.image.outputs.id }}-${{ runner.arch }}-node-${{ inputs.version }}-
+
     - name: Install Node.js dependencies
       if: inputs.dependencies == 'true'
-      uses: metaplex-foundation/actions/install-node-dependencies@v1
-      with:
-        cache: ${{ inputs.cache }}
-        key: "node"
+      run: pnpm install --frozen-lockfile
+      shell: bash

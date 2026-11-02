@@ -1,0 +1,72 @@
+name: Program info
+
+description: |
+  Look one program up in the caller repository's `.github/programs.json` and
+  expose its descriptor as step outputs. See the README section
+  "programs.json" for the schema. Every field has a default derived from the
+  program name, so the minimal descriptor is `{"name": "<dir under programs/>"}`.
+
+inputs:
+  name:
+    description: The program name (its directory under programs/)
+    required: true
+  file:
+    description: Path to programs.json
+    required: true
+    default: .github/programs.json
+
+outputs:
+  package:
+    description: Cargo package name
+    value: ${{ steps.info.outputs.package }}
+  library:
+    description: Cargo library name; the built artifact is <library>.so
+    value: ${{ steps.info.outputs.library }}
+  manifest:
+    description: Cargo.toml that cargo fmt, clippy and build-sbf run against
+    value: ${{ steps.info.outputs.manifest }}
+  workspace:
+    description: Directory solana-verify runs from (the Cargo workspace root containing the program)
+    value: ${{ steps.info.outputs.workspace }}
+  build:
+    description: Build mode, `verified` or `sbf`
+    value: ${{ steps.info.outputs.build }}
+  release_tag:
+    description: Tag prefix for program releases, release/<release_tag>@x.y.z
+    value: ${{ steps.info.outputs.release_tag }}
+  deploy:
+    description: The program's `deploy` object as compact JSON, or `{}`
+    value: ${{ steps.info.outputs.deploy }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read descriptor
+      id: info
+      shell: bash
+      env:
+        PROGRAM: ${{ inputs.name }}
+        FILE: ${{ inputs.file }}
+      run: |
+        set -euo pipefail
+        if [ ! -f "$FILE" ]; then
+          echo "::error::$FILE not found"
+          exit 1
+        fi
+        ENTRY="$(jq -c --arg n "$PROGRAM" '.programs[] | select(.name == $n)' "$FILE")"
+        if [ -z "$ENTRY" ]; then
+          echo "::error::program '$PROGRAM' is not listed in $FILE"
+          exit 1
+        fi
+        # Defaults mirror the solana-project-template layout:
+        #   programs/<name>/Cargo.toml, package <name>-program, library <name_with_underscores>_program.
+        underscored="${PROGRAM//-/_}"
+        {
+          echo "package=$(jq -r --arg d "${PROGRAM}-program" '.package // $d' <<< "$ENTRY")"
+          echo "library=$(jq -r --arg d "${underscored}_program" '.library // $d' <<< "$ENTRY")"
+          echo "manifest=$(jq -r --arg d "programs/${PROGRAM}/Cargo.toml" '.manifest // $d' <<< "$ENTRY")"
+          echo "workspace=$(jq -r '.workspace // "."' <<< "$ENTRY")"
+          echo "build=$(jq -r '.build // "verified"' <<< "$ENTRY")"
+          echo "release_tag=$(jq -r --arg d "$PROGRAM" '.release_tag // $d' <<< "$ENTRY")"
+          echo "deploy=$(jq -c '.deploy // {}' <<< "$ENTRY")"
+        } >> "$GITHUB_OUTPUT"

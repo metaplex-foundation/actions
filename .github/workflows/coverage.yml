@@ -1,0 +1,302 @@
+name: Coverage
+
+# Reusable workflow. Runs the caller's `configs/scripts/program/coverage.sh`
+# (cargo llvm-cov over the program's unit and Mollusk tests) per program,
+# publishes a job summary, posts or updates one sticky comment per program on
+# same-repository pull requests, and uploads the report as an artifact.
+#
+# The script exits non-zero when the program is below the thresholds in
+# `programs/<program>/coverage-thresholds.json`; the summary and comment are
+# still produced.
+
+on:
+  workflow_call:
+    inputs:
+      program_matrix:
+        description: JSON array of program names to measure
+        type: string
+        required: true
+      git_ref:
+        description: Commit, branch or tag; defaults to the triggering commit
+        type: string
+        required: false
+        default: ""
+      runner:
+        description: Runner label
+        type: string
+        required: false
+        default: ubuntu-latest
+      apt_packages:
+        description: Extra apt packages (space separated), e.g. protobuf-compiler
+        type: string
+        required: false
+        default: ""
+      pre_command:
+        description: Shell command to run before measuring (e.g. unit tests for the coverage gate helper)
+        type: string
+        required: false
+        default: ""
+      cache:
+        description: Use dependency caches
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    name: Coverage
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        program: ${{ fromJson(inputs.program_matrix) }}
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.git_ref || github.sha }}
+          persist-credentials: false
+
+      - name: Checkout shared actions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit of this reusable workflow file, so every composite
+          # action below resolves from the same pinned commit the caller chose.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .mpl-actions
+          persist-credentials: false
+
+      # Instrumented native test binaries link with full debug info and can
+      # exhaust the ~14 GB runner disk. Reclaim the preinstalled toolchains
+      # this job never uses.
+      - name: Free disk space
+        shell: bash
+        run: |
+          echo "Before:"; df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          echo "After:"; df -h /
+
+      - name: Load environment variables
+        uses: ./.mpl-actions/load-env
+
+      - name: Pre-command
+        if: inputs.pre_command != ''
+        shell: bash
+        run: ${{ inputs.pre_command }}
+
+      - name: Install apt packages
+        if: inputs.apt_packages != ''
+        shell: bash
+        env:
+          PACKAGES: ${{ inputs.apt_packages }}
+        run: |
+          sudo apt-get update
+          # shellcheck disable=SC2086
+          sudo apt-get install -y $PACKAGES
+
+      - name: Install Rust
+        uses: ./.mpl-actions/install-rust
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Install llvm-tools
+        run: rustup component add llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Install Solana
+        # coverage.sh dumps the external CPI targets with `solana program dump`.
+        uses: ./.mpl-actions/install-solana
+        with:
+          version: ${{ env.SOLANA_VERSION }}
+          cache: ${{ inputs.cache }}
+
+      - name: Cache program dependencies
+        if: inputs.cache
+        uses: ./.mpl-actions/cache-program
+        with:
+          folder: ./programs/${{ matrix.program }}
+          key: program-coverage-${{ matrix.program }}
+
+      - name: Generate coverage report
+        id: coverage
+        shell: bash
+        run: RUST_LOG=error ./configs/scripts/program/coverage.sh
+        env:
+          PROGRAM: ${{ matrix.program }}
+
+      - name: Publish coverage summary
+        if: always()
+        shell: bash
+        env:
+          PROGRAM: ${{ matrix.program }}
+          GATE_OUTCOME: ${{ steps.coverage.outcome }}
+        run: |
+          SUMMARY="coverage/${PROGRAM}/summary.txt"
+          JSON="coverage/${PROGRAM}/coverage.json"
+          GATE="coverage/${PROGRAM}/gate.json"
+          EXTRA="coverage/${PROGRAM}/gate-extra.json"
+          THRESHOLDS="programs/${PROGRAM}/coverage-thresholds.json"
+          THRESHOLDS_JSON='{}'
+          if [ -f "$GATE" ]; then
+            THRESHOLDS_JSON="$(jq -c '.thresholds' "$GATE")"
+          elif [ -f "$THRESHOLDS" ]; then
+            THRESHOLDS_JSON="$(jq -c '.' "$THRESHOLDS")"
+          fi
+          GATE_TEXT="$(jq -r '
+            [ (.lines // empty | "lines >= \(.)%"),
+              (.functions // empty | "functions >= \(.)%"),
+              (.functions_excluding_exclusions // empty | "functions excluding the recorded exclusions >= \(.)%"),
+              (.regions // empty | "regions >= \(.)%"),
+              (if .file_lines then "every file >= \(.file_lines)% lines (\(.allowlist // [] | length) allowlisted)" else empty end) ]
+            | if length == 0 then "none" else join(", ") end' <<< "$THRESHOLDS_JSON")"
+          if [ -f "$GATE" ] && [ "$(jq -r '.passed' "$GATE")" = "true" ] && [ "$GATE_OUTCOME" = "success" ]; then
+            GATE_STATUS="passed"
+          elif [ -f "$GATE" ]; then
+            GATE_STATUS="FAILED"
+          else
+            GATE_STATUS="not evaluated (coverage generation failed)"
+          fi
+          {
+            echo "## Coverage: ${PROGRAM}"
+            echo
+            echo "**Gate:** ${GATE_TEXT} — **${GATE_STATUS}**"
+            echo
+            if [ -f "$EXTRA" ] && [ "$(jq '.errors | length' "$EXTRA")" -gt 0 ]; then
+              echo "<details open><summary>Gate errors</summary>"
+              echo
+              jq -r '.errors[] | "- \(.)"' "$EXTRA"
+              echo
+              echo "</details>"
+              echo
+            fi
+            if [ -f "$JSON" ]; then
+              jq -r '.data[0].totals
+                | "| Metric | Covered | Total | Percent |",
+                  "| --- | ---: | ---: | ---: |",
+                  "| Lines | \(.lines.covered) | \(.lines.count) | \(.lines.percent | . * 100 | round / 100)% |",
+                  "| Functions | \(.functions.covered) | \(.functions.count) | \(.functions.percent | . * 100 | round / 100)% |",
+                  "| Regions | \(.regions.covered) | \(.regions.count) | \(.regions.percent | . * 100 | round / 100)% |"' "$JSON"
+              if [ -f "$GATE" ] && jq -e '.measured.functions_excluding_exclusions != null' "$GATE" >/dev/null; then
+                jq -r '.measured
+                  | "| Functions, excluding the \(.functions_excluded) recorded exclusions | \(.functions_covered) | \(.functions_total - .functions_excluded) | \(.functions_excluding_exclusions | . * 100 | round / 100)% |"' "$GATE"
+              fi
+              echo
+              echo "Covers the crate's unit tests and its Mollusk integration tests (run against the host-compiled program)."
+              echo
+            fi
+            if [ -f "$SUMMARY" ]; then
+              echo "<details><summary>Per-file breakdown</summary>"
+              echo
+              echo '```'
+              cat "$SUMMARY"
+              echo '```'
+              echo
+              echo "</details>"
+            else
+              echo "No coverage report was produced."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post coverage comment on the pull request
+        # Only same-repository PRs: the token is read-only on PRs from forks,
+        # where the job summary above is the fallback.
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PROGRAM: ${{ matrix.program }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GATE_OUTCOME: ${{ steps.coverage.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            const program = process.env.PROGRAM;
+            const runUrl = process.env.RUN_URL;
+            const marker = `<!-- coverage-report:${program} -->`;
+            const dir = `coverage/${program}`;
+
+            const pct = (value) => `${Math.round(value * 100) / 100}%`;
+            const readJson = (path) => (fs.existsSync(path) ? JSON.parse(fs.readFileSync(path, 'utf8')) : null);
+
+            const gate = readJson(`${dir}/gate.json`);
+            const extra = readJson(`${dir}/gate-extra.json`);
+            const thresholds = gate ? gate.thresholds : (readJson(`programs/${program}/coverage-thresholds.json`) ?? {});
+            const gateParts = [];
+            if (thresholds.lines != null) gateParts.push(`lines >= ${thresholds.lines}%`);
+            if (thresholds.functions != null) gateParts.push(`functions >= ${thresholds.functions}%`);
+            if (thresholds.functions_excluding_exclusions != null) gateParts.push(`functions excluding the recorded exclusions >= ${thresholds.functions_excluding_exclusions}%`);
+            if (thresholds.regions != null) gateParts.push(`regions >= ${thresholds.regions}%`);
+            if (thresholds.file_lines != null) gateParts.push(`every file >= ${thresholds.file_lines}% lines (${(thresholds.allowlist ?? []).length} allowlisted)`);
+            const gateText = gateParts.length ? gateParts.join(', ') : 'none';
+            const gateStatus = gate
+              ? (gate.passed && process.env.GATE_OUTCOME === 'success' ? 'passed' : 'FAILED')
+              : 'not evaluated (coverage generation failed)';
+
+            let body = `${marker}\n## Coverage: \`${program}\`\n\n`;
+            body += `**Gate:** ${gateText} — **${gateStatus}**\n\n`;
+            if (extra && Array.isArray(extra.errors) && extra.errors.length) {
+              body += '<details open><summary>Gate errors</summary>\n\n';
+              for (const e of extra.errors) body += `- ${e}\n`;
+              body += '\n</details>\n\n';
+            }
+
+            if (fs.existsSync(`${dir}/coverage.json`)) {
+              const totals = JSON.parse(fs.readFileSync(`${dir}/coverage.json`, 'utf8')).data[0].totals;
+              body += '| Metric | Covered | Total | Percent |\n';
+              body += '| --- | ---: | ---: | ---: |\n';
+              for (const [label, key] of [['Lines', 'lines'], ['Functions', 'functions'], ['Regions', 'regions']]) {
+                const t = totals[key];
+                body += `| ${label} | ${t.covered} | ${t.count} | ${pct(t.percent)} |\n`;
+              }
+              const m = gate?.measured;
+              if (m && m.functions_excluding_exclusions != null) {
+                body += `| Functions, excluding the ${m.functions_excluded} recorded exclusions | ${m.functions_covered} | ${m.functions_total - m.functions_excluded} | ${pct(m.functions_excluding_exclusions)} |\n`;
+              }
+              body += '\nCovers the crate\'s unit tests and its Mollusk integration tests (run against the host-compiled program).\n';
+              if (fs.existsSync(`${dir}/summary.txt`)) {
+                body += '\n<details><summary>Per-file breakdown</summary>\n\n```\n';
+                body += fs.readFileSync(`${dir}/summary.txt`, 'utf8').trimEnd();
+                body += '\n```\n\n</details>\n';
+              }
+              body += `\nFull report (LCOV, JSON, HTML, uncovered lines in \`missing.txt\`) is the \`coverage-${program}\` artifact on [this workflow run](${runUrl}).\n`;
+            } else {
+              body += `Coverage generation failed. See [the workflow run](${runUrl}) for details.\n`;
+            }
+
+            body += `\n<sub>Updated for ${context.payload.pull_request.head.sha}</sub>\n`;
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100,
+            });
+            // Only ever update the workflow's own comment: a user could paste the
+            // marker into theirs, and the token has write access to it.
+            const existing = comments.find(
+              (c) => c.user?.login === 'github-actions[bot]' && c.body?.includes(marker),
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-${{ matrix.program }}
+          path: coverage/${{ matrix.program }}
+          if-no-files-found: error

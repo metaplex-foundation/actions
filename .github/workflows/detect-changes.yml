@@ -1,0 +1,92 @@
+name: Detect changes
+
+# Reusable workflow. Runs the caller repository's `.github/file-filters.yml`
+# through dorny/paths-filter and reduces the program list in
+# `.github/programs.json` to the programs whose filter (`<name>_program`,
+# dashes replaced by underscores) matched.
+
+on:
+  workflow_call:
+    inputs:
+      git_ref:
+        description: Commit, branch or tag to inspect; defaults to the triggering commit
+        type: string
+        required: false
+        default: ""
+    outputs:
+      any:
+        description: "'true' when the `any` filter matched"
+        value: ${{ jobs.changes.outputs.any }}
+      programs:
+        description: "'true' when the `programs` filter matched"
+        value: ${{ jobs.changes.outputs.programs }}
+      program_matrix:
+        description: JSON array of program names whose filter matched
+        value: ${{ jobs.changes.outputs.program_matrix }}
+      js_client:
+        description: "'true' when the `js_client` filter matched"
+        value: ${{ jobs.changes.outputs.js_client }}
+      rust_client:
+        description: "'true' when the `rust_client` filter matched"
+        value: ${{ jobs.changes.outputs.rust_client }}
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # dorny/paths-filter lists the PR's files through the API.
+      pull-requests: read
+    outputs:
+      any: ${{ steps.changes.outputs.any }}
+      programs: ${{ steps.changes.outputs.programs }}
+      program_matrix: ${{ steps.program_matrix.outputs.matrix }}
+      js_client: ${{ steps.changes.outputs.js_client }}
+      rust_client: ${{ steps.changes.outputs.rust_client }}
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.git_ref || github.sha }}
+          # On a push, dorny/paths-filter fetches the previous commit with
+          # git, which a private repository refuses without credentials. On a
+          # pull request it lists the files through the API instead, so the
+          # read-only token is not left in the checkout a fork's filters run
+          # against.
+          persist-credentials: ${{ github.event_name != 'pull_request' }}
+
+      - name: Checkout shared actions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit of this reusable workflow file, so every composite
+          # action below resolves from the same pinned commit the caller chose.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .mpl-actions
+          persist-credentials: false
+
+      - name: Read program list
+        id: programs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f .github/programs.json || { echo "::error::.github/programs.json not found"; exit 1; }
+          echo "list=$(jq -c '[.programs[].name]' .github/programs.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Detect changes
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: changes
+        with:
+          filters: .github/file-filters.yml
+
+      - name: Filter program matrix
+        id: program_matrix
+        uses: ./.mpl-actions/filter-matrix
+        with:
+          matrix: ${{ steps.programs.outputs.list }}
+          changes: ${{ steps.changes.outputs.changes }}
+          suffix: _program

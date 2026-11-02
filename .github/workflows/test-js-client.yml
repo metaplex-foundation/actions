@@ -1,0 +1,168 @@
+name: Test JS client
+
+# Reusable workflow. Starts the caller's local validator (`pnpm validator`,
+# usually amman) with the program builds artifact loaded, then builds and
+# tests the JS client. A second job lints and format-checks it.
+
+on:
+  workflow_call:
+    inputs:
+      git_ref:
+        description: Commit, branch or tag; defaults to the triggering commit
+        type: string
+        required: false
+        default: ""
+      runner:
+        description: Runner label
+        type: string
+        required: false
+        default: ubuntu-latest
+      client_dir:
+        description: Path to the JS client package
+        type: string
+        required: false
+        default: clients/js
+      node_matrix:
+        description: JSON array of Node.js versions to test on; defaults to [NODE_VERSION]
+        type: string
+        required: false
+        default: ""
+      lint:
+        description: Also run the lint job (pnpm format, pnpm lint)
+        type: boolean
+        required: false
+        default: true
+      cache:
+        description: Use dependency caches
+        type: boolean
+        required: false
+        default: true
+    secrets:
+      READ_API_RPC_DEVNET:
+        description: Optional devnet DAS RPC for tests that read compressed assets
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # "default" resolves to NODE_VERSION from .github/.env once it is loaded.
+        node: ${{ fromJson(inputs.node_matrix || '["default"]') }}
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.git_ref || github.sha }}
+          persist-credentials: false
+
+      - name: Checkout shared actions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit of this reusable workflow file, so every composite
+          # action below resolves from the same pinned commit the caller chose.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .mpl-actions
+          persist-credentials: false
+
+      - name: Load environment variables
+        uses: ./.mpl-actions/load-env
+
+      - name: Sanitize ref
+        id: ref
+        uses: ./.mpl-actions/sanitize-ref
+        with:
+          ref: ${{ inputs.git_ref }}
+
+      - name: Download program builds
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ steps.ref.outputs.artifact }}
+
+      - name: Install Solana
+        uses: ./.mpl-actions/install-solana
+        with:
+          version: ${{ env.SOLANA_VERSION }}
+          cache: ${{ inputs.cache }}
+
+      - name: Install Node.js
+        uses: ./.mpl-actions/install-node-with-pnpm
+        with:
+          version: ${{ matrix.node == 'default' && env.NODE_VERSION || matrix.node }}
+          cache: ${{ inputs.cache }}
+          dependencies: true
+
+      - name: Start validator
+        run: pnpm validator
+
+      - name: Install client dependencies
+        uses: ./.mpl-actions/install-node-dependencies
+        with:
+          folder: ./${{ inputs.client_dir }}
+          cache: ${{ inputs.cache }}
+          key: clients-js
+
+      - name: Build
+        working-directory: ./${{ inputs.client_dir }}
+        run: pnpm build
+
+      - name: Test
+        working-directory: ./${{ inputs.client_dir }}
+        run: pnpm test
+        env:
+          READ_API_RPC_DEVNET: ${{ secrets.READ_API_RPC_DEVNET }}
+
+  lint:
+    name: Lint
+    if: inputs.lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.git_ref || github.sha }}
+          persist-credentials: false
+
+      - name: Checkout shared actions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit of this reusable workflow file, so every composite
+          # action below resolves from the same pinned commit the caller chose.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .mpl-actions
+          persist-credentials: false
+
+      - name: Load environment variables
+        uses: ./.mpl-actions/load-env
+
+      - name: Install Node.js
+        uses: ./.mpl-actions/install-node-with-pnpm
+        with:
+          version: ${{ env.NODE_VERSION }}
+          cache: ${{ inputs.cache }}
+
+      - name: Install client dependencies
+        uses: ./.mpl-actions/install-node-dependencies
+        with:
+          folder: ./${{ inputs.client_dir }}
+          cache: ${{ inputs.cache }}
+          key: clients-js
+
+      - name: Format
+        working-directory: ./${{ inputs.client_dir }}
+        run: pnpm format
+
+      - name: Lint
+        working-directory: ./${{ inputs.client_dir }}
+        run: pnpm lint

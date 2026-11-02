@@ -1,0 +1,128 @@
+name: Test Rust client
+
+# Reusable workflow. Downloads the program builds artifact and runs the
+# caller's `configs/scripts/client/test-rust.sh`.
+
+on:
+  workflow_call:
+    inputs:
+      git_ref:
+        description: Commit, branch or tag; defaults to the triggering commit
+        type: string
+        required: false
+        default: ""
+      runner:
+        description: Runner label
+        type: string
+        required: false
+        default: ubuntu-latest
+      client_dir:
+        description: Directory whose target/ is cached (the client crate, or `clients` for several)
+        type: string
+        required: false
+        default: clients/rust
+      apt_packages:
+        description: Extra apt packages (space separated), e.g. protobuf-compiler
+        type: string
+        required: false
+        default: ""
+      sbf_tools_version:
+        description: When set, install solana-cargo-build-sbf and solana-cargo-test-sbf at this crate version (e.g. 4.0.0)
+        type: string
+        required: false
+        default: ""
+      cache:
+        description: Use dependency caches
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.git_ref || github.sha }}
+          persist-credentials: false
+
+      - name: Checkout shared actions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit of this reusable workflow file, so every composite
+          # action below resolves from the same pinned commit the caller chose.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .mpl-actions
+          persist-credentials: false
+
+      - name: Load environment variables
+        uses: ./.mpl-actions/load-env
+
+      - name: Resolve toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          echo "rust=${RUST_CLIENT_RUST_VERSION:-$RUST_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "solana=${RUST_CLIENT_SOLANA_VERSION:-$SOLANA_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Install apt packages
+        if: inputs.apt_packages != ''
+        shell: bash
+        env:
+          PACKAGES: ${{ inputs.apt_packages }}
+        run: |
+          sudo apt-get update
+          # shellcheck disable=SC2086
+          sudo apt-get install -y $PACKAGES
+
+      - name: Install Rust
+        uses: ./.mpl-actions/install-rust
+        with:
+          toolchain: ${{ steps.toolchain.outputs.rust }}
+
+      - name: Install Solana
+        uses: ./.mpl-actions/install-solana
+        with:
+          version: ${{ steps.toolchain.outputs.solana }}
+          cache: ${{ inputs.cache }}
+
+      - name: Install SBF test tools
+        if: inputs.sbf_tools_version != ''
+        shell: bash
+        env:
+          VERSION: ${{ inputs.sbf_tools_version }}
+        run: |
+          cargo install solana-cargo-build-sbf --version "$VERSION" --locked
+          cargo install solana-cargo-test-sbf --version "$VERSION" --locked
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache client dependencies
+        if: inputs.cache
+        uses: ./.mpl-actions/cache-crate
+        with:
+          folder: ./${{ inputs.client_dir }}
+          key: rust-client-test
+
+      - name: Sanitize ref
+        id: ref
+        uses: ./.mpl-actions/sanitize-ref
+        with:
+          ref: ${{ inputs.git_ref }}
+
+      - name: Download program builds
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ steps.ref.outputs.artifact }}
+
+      - name: Run tests
+        shell: bash
+        working-directory: configs/scripts/client
+        run: RUST_LOG=error ./test-rust.sh

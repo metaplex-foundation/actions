@@ -1,0 +1,136 @@
+name: Release Rust client
+
+# Reusable workflow. Called when a `release/rust-client-<name>-v<version>`
+# pull request is merged. Finds the crate in `client_matrix` whose name and
+# version the branch names (with no `head_ref`, the crate whose Cargo.toml
+# the merge commit changed), checks that version is on crates.io, pushes the
+# `<name>@v<version>` tag and creates the GitHub release. Repos with several
+# Rust clients list them all and only the released one is tagged.
+
+on:
+  workflow_call:
+    inputs:
+      client_matrix:
+        description: JSON array of Rust client crate directories to consider
+        type: string
+        required: false
+        default: '["clients/rust"]'
+      merge_commit_sha:
+        description: The merge commit to tag; defaults to the triggering commit
+        type: string
+        required: false
+        default: ""
+      head_ref:
+        description: The merged pull request's branch (release/rust-client-<name>-v<version>), which names the crate and version to release
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Tag and release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.merge_commit_sha || github.sha }}
+          # The merge commit and its first parent, to see which crate changed.
+          fetch-depth: 2
+          # This job pushes the tags below.
+          persist-credentials: true
+
+      - name: Tag released crates
+        id: crates
+        env:
+          CLIENT_MATRIX: ${{ inputs.client_matrix }}
+          HEAD_REF: ${{ inputs.head_ref }}
+        run: |
+          set -euo pipefail
+          # publish-rust-client names the branch after what it published, so
+          # the branch, not the merge diff, says which crate and version to
+          # tag: a rebase merge can leave the bump outside the last commit.
+          EXPECTED="${HEAD_REF#release/rust-client-}"
+          released=()
+          for dir in $(jq -r '.[]' <<< "$CLIENT_MATRIX"); do
+            manifest="$dir/Cargo.toml"
+            NAME="$(grep -E '^name\s*=' "$manifest" | head -n1 | awk -F '"' '{print $2}')"
+            VERSION="$(grep -E '^version\s*=' "$manifest" | head -n1 | awk -F '"' '{print $2}')"
+            if [ -z "$NAME" ] || [ -z "$VERSION" ]; then
+              echo "::error::failed to read name/version from $manifest"
+              exit 1
+            fi
+            if [ -n "$HEAD_REF" ]; then
+              if [ "${NAME}-v${VERSION}" != "$EXPECTED" ]; then
+                echo "$manifest is ${NAME} ${VERSION}, not what the branch ${HEAD_REF} released, skipping"
+                continue
+              fi
+            elif ! git diff --name-only HEAD^1 HEAD -- "$manifest" | grep -q .; then
+              echo "$manifest unchanged in the merge commit, skipping"
+              continue
+            fi
+            if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z]+)*$'; then
+              echo "::error::invalid version '$VERSION' in $manifest"
+              exit 1
+            fi
+            # The release PR normally comes from publish-rust-client, which
+            # has already published. A hand-made release/rust-client-* branch
+            # has not, and must not be tagged as a release.
+            if ! curl -sfS -A "metaplex-foundation/actions release-rust-client" \
+                 "https://crates.io/api/v1/crates/${NAME}/${VERSION}" >/dev/null; then
+              echo "::error::${NAME} ${VERSION} is not on crates.io; publish it before merging a release PR"
+              exit 1
+            fi
+            TAG="${NAME}@v${VERSION}"
+            # A rerun after the tag was pushed but the release failed must
+            # still create the release; a tag that points elsewhere is a
+            # real conflict.
+            if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+              git fetch --depth 1 origin "refs/tags/$TAG:refs/tags/$TAG"
+              if [ "$(git rev-parse "$TAG^{commit}")" != "$(git rev-parse HEAD)" ]; then
+                echo "::error::$TAG already exists and points at another commit"
+                exit 1
+              fi
+              echo "::notice::$TAG already exists at this commit, skipping tag creation"
+            else
+              git tag "$TAG"
+              git push origin "$TAG"
+            fi
+            released+=("$TAG")
+          done
+          if [ "${#released[@]}" -eq 0 ]; then
+            if [ -n "$HEAD_REF" ]; then
+              echo "::error::no crate in $CLIENT_MATRIX is at the name and version the branch $HEAD_REF released ($EXPECTED)"
+            else
+              echo "::error::no crate in $CLIENT_MATRIX had its Cargo.toml changed by this merge"
+            fi
+            exit 1
+          fi
+          echo "tags=$(printf '%s\n' "${released[@]}" | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub releases
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          TAGS: ${{ steps.crates.outputs.tags }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            for (const tag of JSON.parse(process.env.TAGS)) {
+              const [name, version] = tag.split('@v');
+              try {
+                await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+                core.info(`${tag} already has a release, skipping`);
+                continue;
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+              await github.rest.repos.createRelease({
+                owner, repo, tag_name: tag, name: `${name} v${version}`, generate_release_notes: true,
+              });
+              core.info(`released ${tag}`);
+            }

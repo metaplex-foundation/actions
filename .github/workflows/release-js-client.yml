@@ -1,0 +1,99 @@
+name: Release JS client
+
+# Reusable workflow. Called when a `release/js-client-v*` pull request is
+# merged: reads the version from package.json on the merge commit, pushes the
+# `js@v<version>` tag and creates the GitHub release.
+
+on:
+  workflow_call:
+    inputs:
+      client_dir:
+        description: Path to the JS client package
+        type: string
+        required: false
+        default: clients/js
+      merge_commit_sha:
+        description: The merge commit to tag; defaults to the triggering commit
+        type: string
+        required: false
+        default: ""
+      head_ref:
+        description: The merged pull request's branch (release/js-client-v<version>); the merged package.json must carry that version
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Tag and release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.merge_commit_sha || github.sha }}
+          # This job pushes the tag below.
+          persist-credentials: true
+
+      - name: Read package version
+        id: pkg
+        working-directory: ./${{ inputs.client_dir }}
+        env:
+          HEAD_REF: ${{ inputs.head_ref }}
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z]+)*$'; then
+            echo "::error::invalid version '$VERSION' in package.json"
+            exit 1
+          fi
+          # publish-js-client named the branch after the version it
+          # published; a PR whose package.json moved on since would tag a
+          # version that is not the one on npm.
+          if [ -n "$HEAD_REF" ] && [ "${HEAD_REF#release/js-client-v}" != "$VERSION" ]; then
+            echo "::error::branch $HEAD_REF released a different version than package.json's $VERSION"
+            exit 1
+          fi
+          NAME="$(node -p "require('./package.json').name")"
+          # The release PR normally comes from publish-js-client, which has
+          # already published. A hand-made release/js-client-* branch has not,
+          # and must not be tagged as a release.
+          if ! npm view "${NAME}@${VERSION}" version >/dev/null 2>&1; then
+            echo "::error::${NAME}@${VERSION} is not on npm; publish it before merging a release PR"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create tag
+        env:
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="js@v${VERSION}"
+          # A rerun after the tag was pushed but the release failed must not
+          # stop here; a tag that points elsewhere is a real conflict.
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            git fetch --depth 1 origin "refs/tags/$TAG:refs/tags/$TAG"
+            if [ "$(git rev-parse "$TAG^{commit}")" != "$(git rev-parse HEAD)" ]; then
+              echo "::error::$TAG already exists and points at another commit"
+              exit 1
+            fi
+            echo "::notice::$TAG already exists at this commit, skipping tag creation"
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+
+      - name: Create GitHub release
+        uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1.21.0
+        with:
+          tag: js@v${{ steps.pkg.outputs.version }}
+          name: JS client v${{ steps.pkg.outputs.version }}
+          generateReleaseNotes: true
+          # Lets a rerun complete a release that already exists.
+          allowUpdates: true

@@ -1,0 +1,209 @@
+name: Publish Rust client
+
+# Reusable workflow: the publish half of a Rust client release. The caller
+# builds and tests first, then calls this. `cargo release` bumps the version
+# and publishes the crate (unless dry_run); a release pull request then
+# carries the bump back to the base branch, and merging it triggers the
+# caller's release-rust-client workflow which tags and creates the release.
+
+on:
+  workflow_call:
+    inputs:
+      git_ref:
+        description: Commit, branch or tag to publish from; defaults to the triggering ref
+        type: string
+        required: false
+        default: ""
+      level:
+        description: cargo-release level (patch, minor, major, rc, beta, alpha, release) or `version`
+        type: string
+        required: true
+      version:
+        description: Explicit version, used when level is `version`
+        type: string
+        required: false
+        default: ""
+      dry_run:
+        description: Run cargo release without --execute and open no pull request
+        type: boolean
+        required: false
+        default: true
+      client_dir:
+        description: Path to the Rust client crate
+        type: string
+        required: false
+        default: clients/rust
+      base_branch:
+        description: Base branch for the release pull request
+        type: string
+        required: false
+        default: main
+      cache:
+        description: Use dependency caches
+        type: boolean
+        required: false
+        default: true
+    secrets:
+      CRATES_TOKEN:
+        description: crates.io API token
+        required: true
+    outputs:
+      name:
+        description: The crate name
+        value: ${{ jobs.publish.outputs.name }}
+      version:
+        description: The published version
+        value: ${{ jobs.publish.outputs.version }}
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish crate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      name: ${{ steps.release.outputs.name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit, not the branch: the build and test jobs before this
+          # one checked out github.sha, and the branch may have moved since.
+          ref: ${{ inputs.git_ref || github.sha }}
+          persist-credentials: false
+
+      - name: Checkout shared actions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit of this reusable workflow file, so every composite
+          # action below resolves from the same pinned commit the caller chose.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .mpl-actions
+          persist-credentials: false
+
+      - name: Hide the shared actions from git
+        shell: bash
+        # cargo-release refuses to run in a dirty tree and counts untracked
+        # files; the local exclude keeps .mpl-actions out of its view without
+        # a .gitignore entry in every repository.
+        run: echo ".mpl-actions/" >> .git/info/exclude
+
+      - name: Load environment variables
+        uses: ./.mpl-actions/load-env
+
+      - name: Install Rust
+        uses: ./.mpl-actions/install-rust
+        with:
+          # The client may target a newer toolchain than the program.
+          toolchain: ${{ env.RUST_CLIENT_RUST_VERSION || env.RUST_VERSION }}
+
+      - name: Install cargo-release
+        uses: ./.mpl-actions/install-cargo-release
+        with:
+          cache: ${{ inputs.cache }}
+
+      - name: Publish crate
+        id: release
+        working-directory: ./${{ inputs.client_dir }}
+        env:
+          LEVEL: ${{ inputs.level }}
+          VERSION: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          CRATES_TOKEN: ${{ secrets.CRATES_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "$LEVEL" = "version" ]; then
+            BUMP="$VERSION"
+          else
+            BUMP="$LEVEL"
+          fi
+
+          # The checkout is the tested commit, a detached HEAD, which
+          # cargo-release's default allow-branch (`*`, `!HEAD`) rejects.
+          OPTIONS=(--allow-branch HEAD)
+          if [ "$DRY_RUN" = "false" ]; then
+            OPTIONS+=(--no-push --no-tag --no-confirm --execute)
+            git config user.name "${COMMIT_USER_NAME:-github-actions}"
+            git config user.email "${COMMIT_USER_EMAIL:-github-actions@github.com}"
+          fi
+
+          cargo login "$CRATES_TOKEN"
+          START="$(git rev-parse HEAD)"
+          crate_info() {
+            NAME="$(grep -E '^name\s*=' Cargo.toml | head -n1 | awk -F '"' '{print $2}')"
+            VER="$(grep -E '^version\s*=' Cargo.toml | head -n1 | awk -F '"' '{print $2}')"
+          }
+          PUBLISH=true
+          if [ "$DRY_RUN" = "false" ]; then
+            # Bump the manifest alone first to learn the next version. If it
+            # is already on crates.io, this is a rerun after a run that
+            # published but failed to open the release pull request (cargo
+            # release itself would stop before committing): keep the bump in
+            # the tree and skip the publish, but only when the crate on
+            # crates.io is byte for byte what this commit packages.
+            cargo release version "$BUMP" --allow-branch HEAD --no-confirm --execute
+            crate_info
+            # Compare unpacked contents, not archive checksums: every
+            # package embeds .cargo_vcs_info.json with the HEAD commit and a
+            # dirty flag, which differ between the first run (temporary bump
+            # commit) and this rerun (bump uncommitted).
+            REMOTE_DIR="$(mktemp -d)"
+            LOCAL_DIR="$(mktemp -d)"
+            if curl -sfSL -A "metaplex-foundation/actions publish-rust-client" \
+                 "https://crates.io/api/v1/crates/${NAME}/${VER}/download" -o "$REMOTE_DIR/remote.crate"; then
+              tar -xzf "$REMOTE_DIR/remote.crate" -C "$REMOTE_DIR"
+              cargo package --no-verify --allow-dirty
+              tar -xzf "$(cargo metadata --no-deps --format-version 1 | jq -r .target_directory)/package/${NAME}-${VER}.crate" -C "$LOCAL_DIR"
+              if ! diff -r --exclude=.cargo_vcs_info.json "$REMOTE_DIR/${NAME}-${VER}" "$LOCAL_DIR/${NAME}-${VER}"; then
+                echo "::error::${NAME} ${VER} is already on crates.io with different content; bump from the published source or pick another version"
+                exit 1
+              fi
+              echo "::notice::${NAME} ${VER} is already on crates.io with this content; only the release pull request is created"
+              PUBLISH=false
+            else
+              git reset --hard "$START"
+            fi
+          fi
+
+          if [ "$PUBLISH" = true ]; then
+            cargo release "$BUMP" "${OPTIONS[@]}"
+          fi
+
+          # cargo release commits the bump; undo the commit(s) and keep the
+          # working tree change so create-pull-request can commit it on a
+          # release branch instead of pushing to the base branch. Reset to
+          # the recorded commit, not HEAD~1: cargo release may have made no
+          # commit (nothing to bump) or more than one.
+          if [ "$DRY_RUN" = "false" ]; then
+            git reset --soft "$START"
+          fi
+
+          crate_info
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Clean up
+        shell: bash
+        run: rm -rf .mpl-actions
+
+      - name: Create release pull request
+        if: ${{ !inputs.dry_run }}
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          commit-message: 'chore: release ${{ steps.release.outputs.name }} v${{ steps.release.outputs.version }}'
+          # The crate name is part of the branch so repos with several Rust
+          # clients can release them independently.
+          branch: release/rust-client-${{ steps.release.outputs.name }}-v${{ steps.release.outputs.version }}
+          base: ${{ inputs.base_branch }}
+          title: 'chore: release ${{ steps.release.outputs.name }} v${{ steps.release.outputs.version }}'
+          body: |
+            ## Summary
+            - publish-rust-client bumped `${{ steps.release.outputs.name }}` to `${{ steps.release.outputs.version }}` and published it to crates.io
+            - merging this PR tags `${{ steps.release.outputs.name }}@v${{ steps.release.outputs.version }}` and creates the GitHub release
+          labels: release

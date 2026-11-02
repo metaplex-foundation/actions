@@ -1,0 +1,33 @@
+name: Sanitize git ref
+
+description: |
+  Turn a git ref (branch, tag, commit) into a string that is safe to use in
+  an artifact name. Slashes become dashes and an empty ref becomes `default`,
+  so every job in a run derives the same artifact name from the same input.
+
+inputs:
+  ref:
+    description: The git ref, may be empty
+    required: false
+    default: ""
+
+outputs:
+  sanitized:
+    description: The sanitized ref
+    value: ${{ steps.sanitize.outputs.sanitized }}
+  artifact:
+    description: Name of the program-builds artifact for this ref
+    value: program-builds-${{ steps.sanitize.outputs.sanitized }}
+
+runs:
+  using: composite
+  steps:
+    - name: Sanitize ref
+      id: sanitize
+      shell: bash
+      env:
+        GIT_REF: ${{ inputs.ref }}
+      run: |
+        REF="${GIT_REF:-default}"
+        SANITIZED="${REF//\//-}"
+        echo "sanitized=$SANITIZED" >> "$GITHUB_OUTPUT"

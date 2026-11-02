@@ -1,0 +1,77 @@
+{
+  "actions_sha": "REPLACE_WITH_PINNED_COMMIT",
+  "release_example": "release/mpl-project-name@0.1.0",
+  "main": {
+    "push_branches": [
+      "main"
+    ],
+    "pr_branches": [
+      "main"
+    ]
+  },
+  "benchmark": true,
+  "release": {
+    "default_git_ref": "main"
+  },
+  "deploy": {
+    "default_git_ref": "main",
+    "clusters": [
+      "devnet",
+      "mainnet-beta",
+      "sonic-devnet",
+      "sonic-testnet",
+      "eclipse-mainnet",
+      "eclipse-testnet",
+      "eclipse-devnet"
+    ],
+    "program_id_secrets": {
+      "mpl-project-name": "PROGRAM_ID"
+    },
+    "deployer_secrets": {
+      "devnet": "PROGRAM_SOLANA_DEPLOY_KEY",
+      "mainnet-beta": "PROGRAM_SOLANA_DEPLOY_KEY",
+      "sonic": "PROGRAM_SONIC_DEPLOY_KEY",
+      "eclipse": "PROGRAM_ECLIPSE_DEPLOY_KEY"
+    }
+  },
+  "verify": {
+    "clusters": [
+      "mainnet-beta",
+      "devnet"
+    ],
+    "needs_deployer": true
+  },
+  "programs": [
+    {
+      "name": "mpl-project-name",
+      "deploy": {
+        "program_id": "MyProgram1111111111111111111111111111111111",
+        "spill_address": "botTxAkJhuCtNNn9xsH8fHJjzTkcN6XD4dR3R5hkzV2",
+        "repo_visibility": "public",
+        "clusters": {
+          "devnet": {
+            "type": "direct"
+          },
+          "mainnet-beta": {
+            "type": "direct"
+          },
+          "sonic-devnet": {
+            "type": "direct"
+          },
+          "sonic-testnet": {
+            "type": "direct"
+          },
+          "eclipse-devnet": {
+            "type": "direct"
+          },
+          "eclipse-testnet": {
+            "type": "direct"
+          },
+          "eclipse-mainnet": {
+            "type": "direct"
+          }
+        }
+      }
+    }
+  ]
+}
