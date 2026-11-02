@@ -156,6 +156,7 @@ jobs:
         id: plan
         shell: bash
         env:
+          REPO_PRIVATE: ${{ github.event.repository.private }}
           DEPLOY_JSON: ${{ steps.program.outputs.deploy }}
           CLUSTER: ${{ inputs.cluster }}
           RELEASE: ${{ inputs.release_tag }}
@@ -189,7 +190,13 @@ jobs:
             echo "program_index=$(jq -r '.program_index // ""' <<< "$CFG")"
             echo "spill=$(jq -r '.spill_address // ""' <<< "$DEPLOY_JSON")"
             echo "expected_program_id=$(jq -r '.program_id // ""' <<< "$DEPLOY_JSON")"
-            echo "repo_visibility=$(jq -r '.repo_visibility // "public"' <<< "$DEPLOY_JSON")"
+            # The repository's own visibility wins: a private repository
+            # must never get a remote job, whatever programs.json says.
+            if [ "$REPO_PRIVATE" = "true" ]; then
+              echo "repo_visibility=private"
+            else
+              echo "repo_visibility=$(jq -r '.repo_visibility // "public"' <<< "$DEPLOY_JSON")"
+            fi
             echo "deploy_solana=${DEPLOY_SOLANA_VERSION:-$SOLANA_VERSION}"
             # solana-verify and the squads-verified-upgrade crate compile from
             # source and may need a newer Rust than the program (bubblegum).
