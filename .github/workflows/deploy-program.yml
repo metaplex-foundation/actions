@@ -347,7 +347,12 @@ jobs:
             --use-rpc
 
       - name: Verify program (direct, mainnet-beta)
+        id: verify_direct
         if: ${{ !inputs.dry_run && steps.plan.outputs.verify == 'true' }}
+        # The program is already upgraded at this point, so the cluster tag
+        # below must move whatever happens here; the run still fails at the
+        # end if verification did.
+        continue-on-error: true
         uses: ./.mpl-actions/verify-program
         with:
           mode: verify-from-repo
@@ -541,6 +546,13 @@ jobs:
               await github.rest.git.updateRef({ owner, repo, ref: `tags/${tag}`, sha, force: true });
             }
             core.info(`${tag} -> ${sha}`);
+
+      - name: Fail on verification failure
+        if: ${{ steps.verify_direct.outcome == 'failure' }}
+        shell: bash
+        run: |
+          echo "::error::the program was deployed and the cluster tag moved, but verification failed; fix the cause and run the Verify Program workflow for ${{ inputs.program }} on ${{ inputs.cluster }}"
+          exit 1
 
       - name: Clean up signer files
         if: always()

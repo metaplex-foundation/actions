@@ -131,6 +131,8 @@ jobs:
               }
               await github.rest.repos.createRelease({
                 owner, repo, tag_name: tag, name: `${name} v${version}`, generate_release_notes: true,
+                // A pre-release version (1.2.3-rc.1) must not become the latest release.
+                prerelease: version.includes('-'),
               });
               core.info(`released ${tag}`);
             }

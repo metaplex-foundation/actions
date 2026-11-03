@@ -95,5 +95,7 @@ jobs:
           tag: js@v${{ steps.pkg.outputs.version }}
           name: JS client v${{ steps.pkg.outputs.version }}
           generateReleaseNotes: true
+          # A pre-release version (1.2.3-rc.1) must not become the latest release.
+          prerelease: ${{ contains(steps.pkg.outputs.version, '-') }}
           # Lets a rerun complete a release that already exists.
           allowUpdates: true
