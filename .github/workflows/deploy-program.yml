@@ -550,8 +550,11 @@ jobs:
       - name: Fail on verification failure
         if: ${{ steps.verify_direct.outcome == 'failure' }}
         shell: bash
+        env:
+          PROGRAM: ${{ inputs.program }}
+          CLUSTER: ${{ inputs.cluster }}
         run: |
-          echo "::error::the program was deployed and the cluster tag moved, but verification failed; fix the cause and run the Verify Program workflow for ${{ inputs.program }} on ${{ inputs.cluster }}"
+          echo "::error::the program was deployed and the cluster tag moved, but verification failed; fix the cause and run the Verify Program workflow for ${PROGRAM} on ${CLUSTER}"
           exit 1
 
       - name: Clean up signer files
