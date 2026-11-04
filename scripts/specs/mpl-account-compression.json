@@ -1,0 +1,28 @@
+{
+  "actions_sha": "8fcadb6df757cba34aa8475373886eca9b6ce8cf",
+  "main": {
+    "push_branches": [
+      "main"
+    ]
+  },
+  "js_client": false,
+  "rust_client": false,
+  "programs": [
+    {
+      "name": "account-compression",
+      "package": "mpl-account-compression",
+      "library": "mpl_account_compression",
+      "build": "sbf"
+    },
+    {
+      "name": "noop",
+      "package": "mpl-noop",
+      "library": "mpl_noop",
+      "build": "sbf"
+    }
+  ],
+  "generate_clients": false,
+  "create_release": false,
+  "build_programs_filter": "programs",
+  "actions_tag": "v2.0.1"
+}

@@ -97,9 +97,13 @@ jobs:
         shell: bash
         run: |
           echo "Before:"; df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
-          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          # The removals are independent and I/O bound: run them concurrently.
+          for dir in /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost; do
+            sudo rm -rf "$dir" &
+          done
+          sudo docker image prune --all --force >/dev/null 2>&1 &
+          wait
           echo "After:"; df -h /
 
       - name: Load environment variables
@@ -135,18 +139,18 @@ jobs:
 
       - name: Install SBF test tools
         if: inputs.sbf_tools_version != ''
-        shell: bash
-        env:
-          VERSION: ${{ inputs.sbf_tools_version }}
-        run: |
-          cargo install solana-cargo-build-sbf --version "$VERSION" --locked
-          cargo install solana-cargo-test-sbf --version "$VERSION" --locked
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        uses: ./.mpl-actions/install-sbf-tools
+        with:
+          version: ${{ inputs.sbf_tools_version }}
+          cache: ${{ inputs.cache }}
 
       - name: Cache program dependencies
         if: inputs.cache
-        uses: ./.mpl-actions/cache-program
+        uses: ./.mpl-actions/cache-crate
         with:
+          # The program's Cargo workspace (usually the repository root) is
+          # resolved by the action, so the lock file and target/ are found
+          # wherever they live.
           folder: ./programs/${{ matrix.program }}
           key: program-${{ matrix.program }}
 

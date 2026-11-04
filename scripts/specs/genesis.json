@@ -1,0 +1,103 @@
+{
+  "actions_sha": "8fcadb6df757cba34aa8475373886eca9b6ce8cf",
+  "release_example": "release/genesis@0.9.2",
+  "main": {
+    "push_branches": [
+      "main"
+    ],
+    "pr_branches": [
+      "main"
+    ]
+  },
+  "runners": {
+    "test_js": "32-core",
+    "deploy": "ubuntu-latest-16-cores",
+    "verify": "ubuntu-latest-16-cores"
+  },
+  "coverage": {
+    "pre_command": "python3 -m unittest configs/scripts/program/test_coverage_gate.py"
+  },
+  "benchmark": false,
+  "main_rust_client": false,
+  "publish_js": {
+    "deploy_docs": true
+  },
+  "release": {
+    "default_git_ref": "main"
+  },
+  "deploy": {
+    "default_git_ref": "release/genesis@0.9.2",
+    "clusters": [
+      "devnet",
+      "mainnet-beta",
+      "sonic-devnet",
+      "sonic-testnet",
+      "eclipse-mainnet",
+      "eclipse-testnet",
+      "eclipse-devnet"
+    ],
+    "program_id_secrets": {
+      "genesis": "GENESIS_ID"
+    },
+    "deployer_secrets": {
+      "sonic": "GENESIS_SONIC_DEPLOY_KEY",
+      "eclipse": "GENESIS_ECLIPSE_DEPLOY_KEY"
+    }
+  },
+  "verify": {
+    "clusters": [
+      "mainnet-beta"
+    ]
+  },
+  "programs": [
+    {
+      "name": "genesis",
+      "package": "genesis-program",
+      "library": "genesis_program",
+      "deploy": {
+        "program_id": "GNS1S5J5AspKXgpjz6SvKL66kPaKWAhaGRhCqPRxii2B",
+        "spill_address": "botTxAkJhuCtNNn9xsH8fHJjzTkcN6XD4dR3R5hkzV2",
+        "repo_visibility": "private",
+        "clusters": {
+          "devnet": {
+            "type": "squads",
+            "multisig": "Gs6jZWxXFvmZtBcyYr6fBXX5ikwRTemBDS4f6kFuB31U",
+            "vault": "Fsxr5WVKZZoeb7xgwTWRHymSRVGY9vk7m5B5GPu1KU59",
+            "program_index": 4
+          },
+          "mainnet-beta": {
+            "type": "squads",
+            "multisig": "EADFTJ9b6yPAqyRjhz1scirvWhggMSWTt1BgBjKgm5wT",
+            "vault": "bfQVv6niKVgEURYqQ1beJmiEQQN7MrvLRvk3mZGFubb",
+            "program_index": 4
+          },
+          "sonic-devnet": {
+            "type": "direct"
+          },
+          "sonic-testnet": {
+            "type": "direct"
+          },
+          "eclipse-devnet": {
+            "type": "direct"
+          },
+          "eclipse-testnet": {
+            "type": "direct"
+          },
+          "eclipse-mainnet": {
+            "type": "direct"
+          }
+        }
+      }
+    }
+  ],
+  "dump_scripts": [
+    "configs/scripts/program/dump.sh",
+    "configs/scripts/program/dump-devnet.sh"
+  ],
+  "test_programs": {
+    "free_disk_space": true,
+    "clippy_deny_warnings": true
+  },
+  "rust_client_features": "--all-features",
+  "actions_tag": "v2.0.1"
+}

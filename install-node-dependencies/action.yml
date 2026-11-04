@@ -25,8 +25,10 @@ runs:
       if: inputs.cache == 'true'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: ${{ inputs.folder }}/js/node_modules/
-        key: ${{ runner.os }}-${{ inputs.key }}-${{ hashFiles(format('{0}/pnpm-lock.yaml, {0}/package-lock.json, {0}/yarn.lock', inputs.folder)) }}
+        path: ${{ inputs.folder }}/node_modules/
+        # A pnpm workspace keeps the lock file at the repository root, a
+        # standalone package next to its package.json: hash both locations.
+        key: ${{ runner.os }}-${{ inputs.key }}-${{ hashFiles(format('{0}/pnpm-lock.yaml', inputs.folder), format('{0}/package-lock.json', inputs.folder), format('{0}/yarn.lock', inputs.folder), 'pnpm-lock.yaml', 'package-lock.json', 'yarn.lock') }}
         restore-keys: |
           ${{ runner.os }}-${{ inputs.key }}
 
