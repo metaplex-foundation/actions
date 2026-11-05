@@ -21,16 +21,33 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: Runner image
+      id: image
+      if: inputs.cache == 'true'
+      shell: bash
+      # ImageOS (e.g. ubuntu24) separates hosted runner images, whose glibc
+      # differs; self-hosted runners fall back to the OS release.
+      run: echo "id=${ImageOS:-$(. /etc/os-release 2>/dev/null && echo "${ID}${VERSION_ID}" || echo unknown)}" >> "$GITHUB_OUTPUT"
+
+    - name: Node.js version
+      id: node
+      if: inputs.cache == 'true'
+      shell: bash
+      run: echo "version=$(node --version)" >> "$GITHUB_OUTPUT"
+
     - name: Cache dependencies
       if: inputs.cache == 'true'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ inputs.folder }}/node_modules/
-        # A pnpm workspace keeps the lock file at the repository root, a
-        # standalone package next to its package.json: hash both locations.
-        key: ${{ runner.os }}-${{ inputs.key }}-${{ hashFiles(format('{0}/pnpm-lock.yaml', inputs.folder), format('{0}/package-lock.json', inputs.folder), format('{0}/yarn.lock', inputs.folder), 'pnpm-lock.yaml', 'package-lock.json', 'yarn.lock') }}
+        # Native modules are built per Node ABI, CPU and libc, so the key
+        # carries the runner image, architecture and Node version, as
+        # install-node-with-pnpm's does. A pnpm workspace keeps the lock file
+        # at the repository root, a standalone package next to its
+        # package.json: hash both locations.
+        key: ${{ runner.os }}-${{ steps.image.outputs.id }}-${{ runner.arch }}-node-${{ steps.node.outputs.version }}-${{ inputs.key }}-${{ hashFiles(format('{0}/pnpm-lock.yaml', inputs.folder), format('{0}/package-lock.json', inputs.folder), format('{0}/yarn.lock', inputs.folder), 'pnpm-lock.yaml', 'package-lock.json', 'yarn.lock') }}
         restore-keys: |
-          ${{ runner.os }}-${{ inputs.key }}
+          ${{ runner.os }}-${{ steps.image.outputs.id }}-${{ runner.arch }}-node-${{ steps.node.outputs.version }}-${{ inputs.key }}-
 
     - name: Install dependencies
       working-directory: ${{ inputs.folder }}

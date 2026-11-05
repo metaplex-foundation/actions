@@ -7,7 +7,7 @@ The workspace root and its `target/` directory are resolved with cargo, so this 
 Rust must already be installed (use [`install-rust`](../install-rust) first).
 
 ```yaml
-- uses: metaplex-foundation/actions/cache-crate@v2
+- uses: metaplex-foundation/actions/cache-crate@<sha> # v2.1.0
   with:
     folder: ./programs/mpl-core
     key: program-mpl-core

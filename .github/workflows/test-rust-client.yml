@@ -145,12 +145,21 @@ jobs:
           FEATURES: ${{ inputs.features }}
         run: |
           set -euo pipefail
-          while read -r client; do
+          # Fail on malformed or empty input rather than silently running no
+          # clippy at all (a process substitution's failure would not stop the
+          # loop).
+          if ! list="$(jq -er 'if type == "array" and length > 0 and all(type == "string" and length > 0) then .[] else error("not a non-empty array of directories") end' <<< "$CLIENTS")"; then
+            echo "::error::client_matrix must be a non-empty JSON array of crate directories, got: $CLIENTS"
+            exit 1
+          fi
+          mapfile -t clients <<< "$list"
+          for client in "${clients[@]}"; do
+            test -f "$client/Cargo.toml" || { echo "::error::client_matrix entry '$client' has no Cargo.toml"; exit 1; }
             echo "::group::clippy ${client}"
             # shellcheck disable=SC2086
             (cd "$client" && cargo clippy --all-targets --no-deps $FEATURES)
             echo "::endgroup::"
-          done < <(jq -r '.[]' <<< "$CLIENTS")
+          done
 
       - name: Run tests
         shell: bash

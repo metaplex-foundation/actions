@@ -35,20 +35,29 @@ runs:
       run: |
         set -euo pipefail
         test -d "$FOLDER" || { echo "::error::'$FOLDER' is not a directory"; exit 1; }
-        # cargo locate-project walks up from the folder, so a directory such
-        # as `clients` that holds several member crates resolves too.
-        MANIFEST="$(cd "$FOLDER" && cargo locate-project --workspace --message-format plain)"
-        ROOT="$(dirname "$MANIFEST")"
-        TARGET="$(cargo metadata --no-deps --format-version 1 --manifest-path "$MANIFEST" | jq -r '.target_directory')"
-        REL_ROOT="$(realpath --relative-to="$GITHUB_WORKSPACE" "$ROOT")"
-        # rust-cache takes the target directory relative to the workspace root.
-        REL_TARGET="$(realpath -m --relative-to="$ROOT" "$TARGET")"
-        echo "workspace=${REL_ROOT} -> ${REL_TARGET}" >> "$GITHUB_OUTPUT"
-        echo "Caching workspace ${REL_ROOT} (target ${REL_TARGET}) for '$FOLDER'"
+        # Run cargo from the folder itself: it walks up to the workspace
+        # manifest (so a directory such as `clients` that holds several member
+        # crates resolves too) and discovers the same .cargo/config.toml the
+        # build uses, including any build.target-dir override.
+        META="$(cd "$FOLDER" && cargo metadata --no-deps --format-version 1)"
+        ROOT="$(jq -r '.workspace_root' <<< "$META")"
+        TARGET="$(jq -r '.target_directory' <<< "$META")"
+        # rust-cache takes the target directory relative to the workspace root
+        # and accepts an absolute root; no realpath needed (macOS has no
+        # --relative-to).
+        case "$TARGET" in
+          "$ROOT"/*) REL_TARGET="${TARGET#"$ROOT"/}" ;;
+          *) echo "::error::target directory '$TARGET' is outside the workspace '$ROOT'"; exit 1 ;;
+        esac
+        echo "workspace=${ROOT} -> ${REL_TARGET}" >> "$GITHUB_OUTPUT"
+        SHOWN="${ROOT#"$GITHUB_WORKSPACE"}"
+        echo "Caching workspace ${SHOWN:-.} (target ${REL_TARGET}) for '$FOLDER'"
 
     - name: Cache crate dependencies
-      uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:
         workspaces: ${{ steps.workspace.outputs.workspace }}
-        key: ${{ inputs.key }}
+        # shared-key replaces rust-cache's job-id key, so jobs that pass the
+        # same key share one cache, as documented above.
+        shared-key: ${{ inputs.key }}
         cache-on-failure: ${{ inputs.cache-on-failure }}
