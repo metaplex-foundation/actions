@@ -1,0 +1,199 @@
+{
+  "actions_sha": "8fcadb6df757cba34aa8475373886eca9b6ce8cf",
+  "release_example": "release/mpl-agent-identity@0.1.0",
+  "main": {
+    "push_branches": [
+      "main"
+    ],
+    "pr_branches": [
+      "main"
+    ]
+  },
+  "apt_packages": "protobuf-compiler",
+  "build_apt_packages": "protobuf-compiler",
+  "rust_client_matrix": [
+    "clients/rust-identity",
+    "clients/rust-reputation",
+    "clients/rust-validation",
+    "clients/rust-tools"
+  ],
+  "rust_client_features": "--all-features",
+  "rust_client_test_dir": "clients",
+  "publish_js": {
+    "deploy_docs": true
+  },
+  "publish_rust": {
+    "clients": [
+      {
+        "choice": "rust-identity",
+        "dir": "clients/rust-identity"
+      },
+      {
+        "choice": "rust-reputation",
+        "dir": "clients/rust-reputation"
+      },
+      {
+        "choice": "rust-validation",
+        "dir": "clients/rust-validation"
+      },
+      {
+        "choice": "rust-tools",
+        "dir": "clients/rust-tools"
+      }
+    ]
+  },
+  "runners": {
+    "deploy": "ubuntu-latest-16-cores"
+  },
+  "release": {
+    "default_git_ref": "main"
+  },
+  "deploy": {
+    "default_git_ref": "main",
+    "clusters": [
+      "devnet",
+      "mainnet-beta",
+      "sonic-devnet",
+      "sonic-testnet",
+      "eclipse-mainnet",
+      "eclipse-testnet",
+      "eclipse-devnet"
+    ],
+    "program_id_secrets": {
+      "mpl-agent-identity": "IDENTITY_PROGRAM_ID",
+      "mpl-agent-reputation": "REPUTATION_PROGRAM_ID",
+      "mpl-agent-validation": "VALIDATION_PROGRAM_ID",
+      "mpl-agent-tools": "TOOLS_PROGRAM_ID"
+    },
+    "deployer_secrets": {
+      "devnet": "PROGRAM_SOLANA_DEPLOY_KEY",
+      "mainnet-beta": "PROGRAM_SOLANA_DEPLOY_KEY",
+      "sonic": "PROGRAM_SONIC_DEPLOY_KEY",
+      "eclipse": "PROGRAM_ECLIPSE_DEPLOY_KEY"
+    }
+  },
+  "verify": false,
+  "programs": [
+    {
+      "name": "mpl-agent-identity",
+      "build": "sbf",
+      "deploy": {
+        "program_id": "1DREGFgysWYxLnRnKQnwrxnJQeSMk2HmGaC6whw2B2p",
+        "clusters": {
+          "devnet": {
+            "type": "direct"
+          },
+          "mainnet-beta": {
+            "type": "direct"
+          },
+          "sonic-devnet": {
+            "type": "direct"
+          },
+          "sonic-testnet": {
+            "type": "direct"
+          },
+          "eclipse-devnet": {
+            "type": "direct"
+          },
+          "eclipse-testnet": {
+            "type": "direct"
+          },
+          "eclipse-mainnet": {
+            "type": "direct"
+          }
+        }
+      }
+    },
+    {
+      "name": "mpl-agent-reputation",
+      "build": "sbf",
+      "deploy": {
+        "program_id": "REPREG5c1gPHuHukEyANpksLdHFaJCiTrm6zJgNhRZR",
+        "clusters": {
+          "devnet": {
+            "type": "direct"
+          },
+          "mainnet-beta": {
+            "type": "direct"
+          },
+          "sonic-devnet": {
+            "type": "direct"
+          },
+          "sonic-testnet": {
+            "type": "direct"
+          },
+          "eclipse-devnet": {
+            "type": "direct"
+          },
+          "eclipse-testnet": {
+            "type": "direct"
+          },
+          "eclipse-mainnet": {
+            "type": "direct"
+          }
+        }
+      }
+    },
+    {
+      "name": "mpl-agent-validation",
+      "build": "sbf",
+      "deploy": {
+        "program_id": "VALREGY66A9ieJfFUNs5GrxFTy498KUoSU7TbmSePQi",
+        "clusters": {
+          "devnet": {
+            "type": "direct"
+          },
+          "mainnet-beta": {
+            "type": "direct"
+          },
+          "sonic-devnet": {
+            "type": "direct"
+          },
+          "sonic-testnet": {
+            "type": "direct"
+          },
+          "eclipse-devnet": {
+            "type": "direct"
+          },
+          "eclipse-testnet": {
+            "type": "direct"
+          },
+          "eclipse-mainnet": {
+            "type": "direct"
+          }
+        }
+      }
+    },
+    {
+      "name": "mpl-agent-tools",
+      "build": "sbf",
+      "deploy": {
+        "program_id": "TLREGni9ZEyGC3vnPZtqUh95xQ8oPqJSvNjvB7FGK8S",
+        "clusters": {
+          "devnet": {
+            "type": "direct"
+          },
+          "mainnet-beta": {
+            "type": "direct"
+          },
+          "sonic-devnet": {
+            "type": "direct"
+          },
+          "sonic-testnet": {
+            "type": "direct"
+          },
+          "eclipse-devnet": {
+            "type": "direct"
+          },
+          "eclipse-testnet": {
+            "type": "direct"
+          },
+          "eclipse-mainnet": {
+            "type": "direct"
+          }
+        }
+      }
+    }
+  ],
+  "actions_tag": "v2.0.1"
+}

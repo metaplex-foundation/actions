@@ -52,29 +52,25 @@ def program_opts(indent=4):
 
 
 def rust_client_opts():
+    """`with:` entries of test-rust-client, which runs clippy on every crate in
+    `rust_client_matrix` and then the client tests, sharing one dependency build."""
     s = SPEC
     return [
         ("apt_packages", s.get("apt_packages", "")),
         ("sbf_tools_version", s.get("sbf_tools_version", "")),
         ("client_dir", s.get("rust_client_test_dir", "")),
+        ("client_matrix", f"'{json.dumps(s['rust_client_matrix'])}'" if s.get("rust_client_matrix") else ""),
+        ("features", s.get("rust_client_features", "")),
         ("runner", s.get("runners", {}).get("test_rust_client", "")),
     ]
 
 
-def build_rust_client_opts():
-    s = SPEC
-    return [
-        ("apt_packages", s.get("apt_packages", "")),
-        ("client_matrix", f"'{json.dumps(s['rust_client_matrix'])}'" if s.get("rust_client_matrix") else ""),
-        ("features", s.get("rust_client_features", "")),
-    ]
-
-
 def js_opts():
+    """JS clients are tested on NODE_VERSION from .github/.env only: one Node
+    release per repository, no matrix."""
     s = SPEC
     return [
         ("client_dir", s.get("js_client_dir", "")),
-        ("node_matrix", f"'{json.dumps(s['node_matrix'])}'" if s.get("node_matrix") else ""),
         ("lint", "false" if s.get("js_lint") is False else ""),
         ("runner", s.get("runners", {}).get("test_js", "")),
     ]
@@ -148,27 +144,29 @@ def gen_main():
                        with_pairs=[("program_matrix", "${{ needs.changes.outputs.program_matrix }}"),
                                    ("apt_packages", s.get("apt_packages", "")),
                                    ("pre_command", cov.get("pre_command", ""))]))
+    # The client jobs test the committed clients against the program builds,
+    # so they wait for build_programs only. generate_clients checks the
+    # committed clients for drift from the program source and needs neither
+    # the builds nor the tests: it runs alongside them and still fails the run
+    # when they drift.
     if s.get("generate_clients", True):
-        out.append(job("generate_clients", "Generate clients", "generate-clients", needs=["changes", "build_programs"],
+        out.append(job("generate_clients", "Generate clients", "generate-clients", needs="changes",
                        cond="needs.changes.outputs.any == 'true'", perms=["contents: read"],
                        with_pairs=[("install_anchor", "true" if s.get("install_anchor") else ""),
                                    ("runner", s.get("runners", {}).get("generate_clients", ""))]))
     if s.get("js_client", True):
-        out.append(job("test_js", "JS Client", "test-js-client", needs=["changes", "generate_clients"],
+        out.append(job("test_js", "JS Client", "test-js-client", needs=["changes", "build_programs"],
                        cond="needs.changes.outputs.js_client == 'true'", perms=["contents: read"],
                        secrets_block=js_secrets(), with_pairs=js_opts()))
     if s.get("benchmark"):
         bperms = ["contents: write", "deployments: write", "pull-requests: write"]
-        out.append(job("benchmark", "Benchmark", "benchmark", needs="generate_clients",
+        out.append(job("benchmark", "Benchmark", "benchmark", needs="build_programs",
                        cond="github.event_name == 'push' && github.ref == 'refs/heads/main'",
                        perms=bperms, with_pairs=[("mode", "store")]))
-        out.append(job("benchmark_summary", "Benchmark Summary", "benchmark", needs="generate_clients",
+        out.append(job("benchmark_summary", "Benchmark Summary", "benchmark", needs="build_programs",
                        cond="github.event_name == 'pull_request'", perms=bperms, with_pairs=[("mode", "summary")]))
     if s.get("rust_client", True) and s.get("main_rust_client", True):
-        out.append(job("build_rust_client", "Rust Client", "build-rust-client", needs=["changes", "generate_clients"],
-                       cond="needs.changes.outputs.rust_client == 'true'", perms=["contents: read"],
-                       with_pairs=build_rust_client_opts()))
-        out.append(job("test_rust_client", "Rust Client", "test-rust-client", needs=["changes", "generate_clients"],
+        out.append(job("test_rust_client", "Rust Client", "test-rust-client", needs=["changes", "build_programs"],
                        cond="needs.changes.outputs.rust_client == 'true'", perms=["contents: read"],
                        with_pairs=rust_client_opts()))
     return "\n".join(out).rstrip("\n") + "\n"
@@ -406,9 +404,7 @@ def gen_publish_rust():
     out.append(job("build_programs", "Programs", "build-programs", perms=["contents: read"],
                    with_pairs=[("apt_packages", s.get("build_apt_packages", "")),
                                ("runner", s.get("runners", {}).get("build_programs", ""))]))
-    out.append(job("build_rust_client", "Rust client", "build-rust-client", perms=["contents: read"],
-                   with_pairs=build_rust_client_opts()))
-    out.append(job("test_rust_client", "Rust client", "test-rust-client", needs=["build_programs", "build_rust_client"],
+    out.append(job("test_rust_client", "Rust client", "test-rust-client", needs="build_programs",
                    perms=["contents: read"], with_pairs=rust_client_opts()))
     if clients:
         client_dir = " || ".join(f"inputs.client == '{c['choice']}' && '{c['dir']}'" for c in clients)

@@ -1,0 +1,87 @@
+{
+  "actions_sha": "8fcadb6df757cba34aa8475373886eca9b6ce8cf",
+  "release_example": "release/distro@0.4.0",
+  "main": {
+    "push_branches": [
+      "main"
+    ],
+    "pr_branches": [
+      "main"
+    ]
+  },
+  "rust_client_features": "--all-features",
+  "publish_js": {
+    "deploy_docs": true
+  },
+  "runners": {
+    "deploy": "ubuntu-latest-16-cores",
+    "verify": "ubuntu-latest-16-cores"
+  },
+  "release": {
+    "default_git_ref": "main"
+  },
+  "deploy": {
+    "default_git_ref": "release/distro@0.4.0",
+    "clusters": [
+      "devnet",
+      "mainnet-beta",
+      "sonic-devnet",
+      "sonic-testnet",
+      "eclipse-mainnet",
+      "eclipse-testnet",
+      "eclipse-devnet"
+    ],
+    "program_id_secrets": {
+      "mpl-distro": "DISTRO_ID"
+    },
+    "deployer_secrets": {
+      "devnet": "DISTRO_DEPLOY_KEY",
+      "mainnet-beta": "DISTRO_DEPLOY_KEY",
+      "sonic": "DISTRO_SONIC_DEPLOY_KEY",
+      "eclipse": "DISTRO_ECLIPSE_DEPLOY_KEY"
+    }
+  },
+  "verify": {
+    "clusters": [
+      "mainnet-beta"
+    ],
+    "needs_deployer": true
+  },
+  "programs": [
+    {
+      "name": "mpl-distro",
+      "package": "mpl-distro-program",
+      "library": "mpl_distro_program",
+      "release_tag": "distro",
+      "deploy": {
+        "program_id": "D1STRoZTUiEa6r8TLg2aAbG4nSRT5cDBmgG7jDqCZvU8",
+        "spill_address": "botTxAkJhuCtNNn9xsH8fHJjzTkcN6XD4dR3R5hkzV2",
+        "repo_visibility": "private",
+        "clusters": {
+          "devnet": {
+            "type": "direct"
+          },
+          "mainnet-beta": {
+            "type": "direct"
+          },
+          "sonic-devnet": {
+            "type": "direct"
+          },
+          "sonic-testnet": {
+            "type": "direct"
+          },
+          "eclipse-devnet": {
+            "type": "direct"
+          },
+          "eclipse-testnet": {
+            "type": "direct"
+          },
+          "eclipse-mainnet": {
+            "type": "direct"
+          }
+        }
+      }
+    }
+  ],
+  "actions_tag": "v2.0.1"
+}

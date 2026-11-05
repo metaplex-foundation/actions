@@ -1,0 +1,102 @@
+{
+  "actions_sha": "8fcadb6df757cba34aa8475373886eca9b6ce8cf",
+  "release_example": "release/core@0.9.2",
+  "main": {
+    "push_branches": [
+      "main",
+      "jun-2024-feature-staging"
+    ],
+    "pr_branches": [
+      "main",
+      "jun-2024-feature-staging",
+      "'claude/**'"
+    ],
+    "pr_comment": "# Stacked pull requests target the branch below them in the stack rather\n# than a long-lived branch, so restricting this to `main` would leave every\n# PR in a stack with no CI at all. Any PR that targets a development branch\n# gets the same checks as one targeting `main`."
+  },
+  "apt_packages": "protobuf-compiler",
+  "sbf_tools_version": "4.0.0",
+  "coverage": true,
+  "benchmark": true,
+  "publish_js": {
+    "deploy_docs": true
+  },
+  "runners": {
+    "deploy": "ubuntu-latest-16-cores",
+    "verify": "ubuntu-latest-16-cores"
+  },
+  "release": {
+    "default_git_ref": "main"
+  },
+  "deploy": {
+    "default_git_ref": "release/core@0.9.2",
+    "clusters": [
+      "devnet",
+      "mainnet-beta",
+      "sonic-devnet",
+      "sonic-testnet",
+      "eclipse-mainnet",
+      "eclipse-testnet",
+      "eclipse-devnet"
+    ],
+    "program_id_secrets": {
+      "mpl-core": "CORE_ID"
+    },
+    "deployer_secrets": {
+      "sonic": "CORE_SONIC_DEPLOY_KEY",
+      "eclipse": "CORE_ECLIPSE_DEPLOY_KEY"
+    }
+  },
+  "verify": {
+    "clusters": [
+      "mainnet-beta",
+      "devnet"
+    ]
+  },
+  "programs": [
+    {
+      "name": "mpl-core",
+      "package": "mpl-core-program",
+      "library": "mpl_core_program",
+      "release_tag": "core",
+      "deploy": {
+        "program_id": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d",
+        "spill_address": "botTxAkJhuCtNNn9xsH8fHJjzTkcN6XD4dR3R5hkzV2",
+        "repo_visibility": "public",
+        "clusters": {
+          "devnet": {
+            "type": "squads",
+            "multisig": "Gs6jZWxXFvmZtBcyYr6fBXX5ikwRTemBDS4f6kFuB31U",
+            "vault": "Fsxr5WVKZZoeb7xgwTWRHymSRVGY9vk7m5B5GPu1KU59",
+            "program_index": 1
+          },
+          "mainnet-beta": {
+            "type": "squads",
+            "multisig": "EADFTJ9b6yPAqyRjhz1scirvWhggMSWTt1BgBjKgm5wT",
+            "vault": "bfQVv6niKVgEURYqQ1beJmiEQQN7MrvLRvk3mZGFubb",
+            "program_index": 1
+          },
+          "sonic-devnet": {
+            "type": "direct"
+          },
+          "sonic-testnet": {
+            "type": "direct"
+          },
+          "eclipse-devnet": {
+            "type": "direct"
+          },
+          "eclipse-testnet": {
+            "type": "direct"
+          },
+          "eclipse-mainnet": {
+            "type": "direct"
+          }
+        }
+      }
+    }
+  ],
+  "dump_scripts": [
+    "configs/scripts/program/dump.sh",
+    "configs/scripts/program/dump_oracle_example.sh"
+  ],
+  "actions_tag": "v2.0.1"
+}

@@ -1,0 +1,67 @@
+{
+  "actions_sha": "8fcadb6df757cba34aa8475373886eca9b6ce8cf",
+  "release_example": "release/hybrid@0.1.0",
+  "main": {
+    "push_branches": [
+      "main",
+      "third-party-plugins-staging"
+    ],
+    "pr_branches": [
+      "main",
+      "third-party-plugins-staging"
+    ]
+  },
+  "rust_client_features": "--all-features",
+  "publish_js": {
+    "deploy_docs": true
+  },
+  "runners": {
+    "deploy": "ubuntu-latest-16-cores",
+    "verify": "ubuntu-latest-16-cores"
+  },
+  "release": {
+    "default_git_ref": "main"
+  },
+  "deploy": {
+    "default_git_ref": "main",
+    "clusters": [
+      "devnet",
+      "mainnet-beta"
+    ],
+    "program_id_secrets": {
+      "mpl-hybrid": "HYBRID_ID"
+    },
+    "deployer_secrets": {
+      "devnet": "HYBRID_DEPLOYER_KEY",
+      "mainnet-beta": "HYBRID_DEPLOYER_KEY"
+    },
+    "squads_bot_secret": ""
+  },
+  "verify": {
+    "clusters": [
+      "mainnet-beta"
+    ],
+    "needs_deployer": true
+  },
+  "programs": [
+    {
+      "name": "mpl-hybrid",
+      "package": "mpl-hybrid-program",
+      "library": "mpl_hybrid",
+      "release_tag": "hybrid",
+      "deploy": {
+        "program_id": "MPL4o4wMzndgh8T1NVDxELQCj5UQfYTYEkabX3wNKtb",
+        "repo_visibility": "public",
+        "clusters": {
+          "devnet": {
+            "type": "direct"
+          },
+          "mainnet-beta": {
+            "type": "direct"
+          }
+        }
+      }
+    }
+  ],
+  "actions_tag": "v2.0.1"
+}

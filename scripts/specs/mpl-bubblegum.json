@@ -1,0 +1,98 @@
+{
+  "actions_sha": "8fcadb6df757cba34aa8475373886eca9b6ce8cf",
+  "release_example": "release/bubblegum@0.13.0",
+  "main": {
+    "push_branches": [
+      "main"
+    ],
+    "pr_branches": null
+  },
+  "js_test_secrets": [
+    "READ_API_RPC_DEVNET"
+  ],
+  "runners": {
+    "test_programs": "ubuntu-latest-16-cores",
+    "test_rust_client": "ubuntu-latest-16-cores"
+  },
+  "release": {
+    "default_git_ref": "main",
+    "types": [
+      "solana",
+      "svm",
+      "commit"
+    ]
+  },
+  "deploy": {
+    "default_git_ref": "release/bubblegum@0.13.0",
+    "clusters": [
+      "devnet",
+      "mainnet-beta",
+      "sonic-devnet",
+      "sonic-testnet",
+      "eclipse-mainnet",
+      "eclipse-devnet"
+    ],
+    "program_id_secrets": {
+      "bubblegum": "BUBBLEGUM_ID"
+    },
+    "deployer_secrets": {
+      "sonic": "BUBBLEGUM_SONIC_DEPLOY_KEY",
+      "eclipse": "BUBBLEGUM_ECLIPSE_DEPLOY_KEY"
+    }
+  },
+  "verify": {
+    "clusters": [
+      "mainnet-beta",
+      "devnet"
+    ]
+  },
+  "programs": [
+    {
+      "name": "bubblegum",
+      "package": "bubblegum",
+      "library": "bubblegum",
+      "manifest": "programs/bubblegum/Cargo.toml",
+      "workspace": "programs/bubblegum",
+      "deploy": {
+        "program_id": "BGUMAp9Gq7iTEuizy4pqaxsTyUCBK68MDfK752saRPUY",
+        "spill_address": "botTxAkJhuCtNNn9xsH8fHJjzTkcN6XD4dR3R5hkzV2",
+        "repo_visibility": "public",
+        "clusters": {
+          "devnet": {
+            "type": "squads",
+            "multisig": "Gs6jZWxXFvmZtBcyYr6fBXX5ikwRTemBDS4f6kFuB31U",
+            "vault": "Fsxr5WVKZZoeb7xgwTWRHymSRVGY9vk7m5B5GPu1KU59",
+            "program_index": 2
+          },
+          "mainnet-beta": {
+            "type": "squads",
+            "multisig": "EADFTJ9b6yPAqyRjhz1scirvWhggMSWTt1BgBjKgm5wT",
+            "vault": "bfQVv6niKVgEURYqQ1beJmiEQQN7MrvLRvk3mZGFubb",
+            "program_index": 2
+          },
+          "sonic-devnet": {
+            "type": "direct"
+          },
+          "sonic-testnet": {
+            "type": "direct"
+          },
+          "eclipse-devnet": {
+            "type": "direct"
+          },
+          "eclipse-mainnet": {
+            "type": "direct"
+          }
+        }
+      }
+    }
+  ],
+  "dump_scripts": [
+    "configs/scripts/program/dump.sh",
+    "configs/scripts/program/dump_devnet.sh"
+  ],
+  "rust_client_features": "--all-features",
+  "publish_js": {
+    "deploy_docs": true
+  },
+  "actions_tag": "v2.0.1"
+}

@@ -36,6 +36,11 @@ on:
         type: string
         required: false
         default: ""
+      free_disk_space:
+        description: Remove unused preinstalled toolchains before building (instrumented test binaries can exhaust the 14 GB runner disk)
+        type: boolean
+        required: false
+        default: true
       cache:
         description: Use dependency caches
         type: boolean
@@ -77,12 +82,17 @@ jobs:
       # exhaust the ~14 GB runner disk. Reclaim the preinstalled toolchains
       # this job never uses.
       - name: Free disk space
+        if: inputs.free_disk_space
         shell: bash
         run: |
           echo "Before:"; df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
-          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          # The removals are independent and I/O bound: run them concurrently.
+          for dir in /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost; do
+            sudo rm -rf "$dir" &
+          done
+          sudo docker image prune --all --force >/dev/null 2>&1 &
+          wait
           echo "After:"; df -h /
 
       - name: Load environment variables
@@ -125,7 +135,7 @@ jobs:
 
       - name: Cache program dependencies
         if: inputs.cache
-        uses: ./.mpl-actions/cache-program
+        uses: ./.mpl-actions/cache-crate
         with:
           folder: ./programs/${{ matrix.program }}
           key: program-coverage-${{ matrix.program }}

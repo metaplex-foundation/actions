@@ -1,0 +1,57 @@
+name: Install SBF test tools
+
+description: |
+  Install `cargo-build-sbf` and `cargo-test-sbf` at a given crate version
+  (solana-cargo-build-sbf / solana-cargo-test-sbf) in front of the copies
+  that ship with the Solana CLI, for programs whose platform-tools need a
+  newer `cargo build-sbf` than their Solana release provides.
+
+  The two binaries are compiled with `cargo install`, which takes two to
+  three minutes, so they are cached per version. They are installed under
+  ~/.sbf-tools rather than ~/.cargo/bin: cache-crate (rust-cache) prunes
+  cargo's bin directory when it saves, which would empty this cache's save.
+
+inputs:
+  version:
+    description: The solana-cargo-build-sbf / solana-cargo-test-sbf crate version to install (e.g. 4.0.0)
+    required: true
+  cache:
+    description: Whether the installed binaries should be cached
+    required: true
+    default: "true"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Cache SBF test tools
+      id: cache
+      if: inputs.cache == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.sbf-tools/bin
+        key: ${{ runner.os }}-${{ runner.arch }}-sbf-tools-${{ inputs.version }}
+
+    - name: Install SBF test tools
+      if: inputs.cache != 'true' || steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        cargo install solana-cargo-build-sbf --version "$VERSION" --locked --root ~/.sbf-tools
+        cargo install solana-cargo-test-sbf --version "$VERSION" --locked --root ~/.sbf-tools
+
+    - name: Put the SBF test tools in front of the Solana CLI's copies
+      shell: bash
+      # GITHUB_PATH prepends, so this must run after install-solana.
+      run: echo "$HOME/.sbf-tools/bin" >> "$GITHUB_PATH"
+
+    - name: Verify SBF test tools
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        for tool in cargo-build-sbf cargo-test-sbf; do
+          found="$(command -v "$tool")"
+          echo "$tool: $found ($("$tool" --version))"
+          [ "$found" = "$HOME/.sbf-tools/bin/$tool" ] || { echo "::error::$tool resolves to $found, not to the pinned $VERSION in ~/.sbf-tools/bin"; exit 1; }
+        done

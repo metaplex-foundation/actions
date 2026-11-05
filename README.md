@@ -24,8 +24,7 @@ Per-repository facts stay in the calling repository in two files:
 | `coverage.yml` | `configs/scripts/program/coverage.sh` per program with a sticky PR comment | coverage.sh |
 | `generate-clients.yml` | `pnpm generate` and fails on drift | root package.json `generate` script |
 | `test-js-client.yml` | validator + build + test, and a lint job | `pnpm validator`, client `build`/`test`/`format`/`lint` scripts |
-| `build-rust-client.yml` | clippy + release build per client crate | |
-| `test-rust-client.yml` | `configs/scripts/client/test-rust.sh` with the program builds | test-rust.sh |
+| `test-rust-client.yml` | clippy per client crate, then `configs/scripts/client/test-rust.sh` with the program builds | test-rust.sh |
 | `benchmark.yml` | `pnpm bench` stored to gh-pages (`mode: store`) or commented on the PR (`mode: summary`) | client `bench` script |
 | `publish-js-client.yml` | npm publish with provenance, then a release PR | |
 | `publish-rust-client.yml` | cargo release, then a release PR | `CRATES_TOKEN` |
@@ -35,14 +34,21 @@ Per-repository facts stay in the calling repository in two files:
 | `verify-program.yml` | Rebuild, compare the on-chain hash, submit the OtterSec job | programs.json `deploy`, secrets |
 
 Workflows are not nested: the caller's `main.yml` wires them together so
-every reference is a pinned commit. Inside a reusable workflow the composite
+every reference is a pinned commit. The job graph keeps the critical path
+short: `detect-changes` → `build-programs` → the client tests, with
+`test-programs`, `coverage` and `generate-clients` alongside rather than in
+front of them (the clients under test are the committed ones;
+`generate-clients` only checks them for drift). JS clients are tested on the
+repository's `NODE_VERSION` alone, not on a matrix of Node releases. Inside a reusable workflow the composite
 actions are taken from the same commit by checking this repository out at
 `job.workflow_sha`, so a consumer that pins one SHA pins everything.
 
 The reference caller lives in
 [solana-project-template](https://github.com/metaplex-foundation/solana-project-template);
 `scripts/gen-caller.py` generates a repository's caller workflows and
-`programs.json` from a short spec (see its docstring).
+`programs.json` from a short spec (see its docstring). The specs of the
+consuming repositories live in `scripts/specs/`; bump `actions_sha` and
+`actions_tag` there and regenerate to roll a release out.
 
 ### programs.json
 
@@ -120,15 +126,21 @@ notes about markdown backticks and grouped redirects.
 - [Sanitize git ref](./sanitize-ref): artifact-safe ref names
 - [Program info](./program-info): one entry of `programs.json` as outputs
 - [Cache IDL generators](./cache-idl-generators)
-- [Cache program dependencies](./cache-program)
-- [Cache all programs dependencies](./cache-programs)
-- [Cache crate dependencies](./cache-crate)
+- [Cache crate dependencies](./cache-crate): the registry and compiled
+  dependencies of the Cargo workspace containing a crate, via
+  Swatinem/rust-cache; used by the test and coverage workflows
+- [Cache all programs dependencies](./cache-programs): plain `actions/cache`
+  over `programs/**/target`, used by the build and generate workflows
+- [Cache program dependencies](./cache-program): legacy v1 action, superseded
+  by `cache-crate`
 - [Filter matrix](./filter-matrix)
 - [Install Anchor CLI](./install-anchor-cli)
 - [Install cargo-release](./install-cargo-release)
 - [Install Node dependencies](./install-node-dependencies)
 - [Install Node with PNPM](./install-node-with-pnpm)
 - [Install Rust](./install-rust)
+- [Install SBF test tools](./install-sbf-tools): pinned, cached
+  `cargo-build-sbf` / `cargo-test-sbf` in front of the Solana CLI's copies
 - [Install Solana](./install-solana)
 - [Install solana-verify](./install-solana-verify)
 - [Start a local validator](./start-validator)

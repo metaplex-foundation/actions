@@ -1,0 +1,123 @@
+{
+  "actions_sha": "8fcadb6df757cba34aa8475373886eca9b6ce8cf",
+  "release_example": "release/candy-guard@0.2.2",
+  "main": {
+    "push_branches": [
+      "main"
+    ],
+    "pr_branches": [
+      "main"
+    ]
+  },
+  "rust_client": false,
+  "publish_js": {
+    "deploy_docs": true
+  },
+  "runners": {
+    "build_programs": "ubuntu-latest-16-cores",
+    "generate_clients": "ubuntu-latest-8-cores",
+    "verify": "ubuntu-latest-16-cores"
+  },
+  "release": {
+    "default_git_ref": "main"
+  },
+  "deploy": {
+    "default_git_ref": "main",
+    "clusters": [
+      "devnet",
+      "mainnet-beta",
+      "sonic-devnet",
+      "sonic-testnet",
+      "eclipse-mainnet",
+      "eclipse-devnet"
+    ],
+    "program_id_secrets": {
+      "candy-machine-core": "CORE_CANDY_MACHINE_CORE_ID",
+      "candy-guard": "CORE_CANDY_GUARD_ID"
+    },
+    "deployer_secrets": {
+      "candy-machine-core": {
+        "devnet": "CORE_CANDY_MACHINE_CORE_DEPLOY_KEY",
+        "mainnet-beta": "CORE_CANDY_MACHINE_CORE_DEPLOY_KEY",
+        "sonic": "CORE_CANDY_MACHINE_SONIC_DEPLOY_KEY",
+        "eclipse": "CORE_CANDY_MACHINE_ECLIPSE_DEPLOY_KEY"
+      },
+      "candy-guard": {
+        "devnet": "CORE_CANDY_GUARD_DEPLOY_KEY",
+        "mainnet-beta": "CORE_CANDY_GUARD_DEPLOY_KEY",
+        "sonic": "CORE_CANDY_MACHINE_SONIC_DEPLOY_KEY",
+        "eclipse": "CORE_CANDY_MACHINE_ECLIPSE_DEPLOY_KEY"
+      }
+    },
+    "squads_bot_secret": false
+  },
+  "verify": {
+    "clusters": [
+      "mainnet-beta"
+    ],
+    "needs_deployer": true
+  },
+  "programs": [
+    {
+      "name": "candy-machine-core",
+      "package": "mpl-core-candy-machine-core",
+      "library": "mpl_core_candy_machine_core",
+      "manifest": "programs/candy-machine-core/program/Cargo.toml",
+      "deploy": {
+        "program_id": "CMACYFENjoBMHzapRXyo1JZkVS6EtaDDzkjMrmQLvr4J",
+        "repo_visibility": "public",
+        "clusters": {
+          "devnet": {
+            "type": "direct"
+          },
+          "mainnet-beta": {
+            "type": "direct"
+          },
+          "sonic-devnet": {
+            "type": "direct"
+          },
+          "sonic-testnet": {
+            "type": "direct"
+          },
+          "eclipse-devnet": {
+            "type": "direct"
+          },
+          "eclipse-mainnet": {
+            "type": "direct"
+          }
+        }
+      }
+    },
+    {
+      "name": "candy-guard",
+      "package": "mpl-core-candy-guard",
+      "library": "mpl_core_candy_guard",
+      "manifest": "programs/candy-guard/program/Cargo.toml",
+      "deploy": {
+        "program_id": "CMAGAKJ67e9hRZgfC5SFTbZH8MgEmtqazKXjmkaJjWTJ",
+        "repo_visibility": "public",
+        "clusters": {
+          "devnet": {
+            "type": "direct"
+          },
+          "mainnet-beta": {
+            "type": "direct"
+          },
+          "sonic-devnet": {
+            "type": "direct"
+          },
+          "sonic-testnet": {
+            "type": "direct"
+          },
+          "eclipse-devnet": {
+            "type": "direct"
+          },
+          "eclipse-mainnet": {
+            "type": "direct"
+          }
+        }
+      }
+    }
+  ],
+  "actions_tag": "v2.0.1"
+}

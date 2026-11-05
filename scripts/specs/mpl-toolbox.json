@@ -1,0 +1,31 @@
+{
+  "actions_sha": "8fcadb6df757cba34aa8475373886eca9b6ce8cf",
+  "main": {
+    "push_branches": [
+      "main"
+    ],
+    "pr_branches": [
+      "main"
+    ]
+  },
+  "rust_client": false,
+  "publish_js": {
+    "deploy_docs": true
+  },
+  "programs": [
+    {
+      "name": "system-extras",
+      "package": "mpl-system-extras",
+      "library": "mpl_system_extras",
+      "build": "sbf"
+    },
+    {
+      "name": "token-extras",
+      "package": "mpl-token-extras",
+      "library": "mpl_token_extras",
+      "build": "sbf"
+    }
+  ],
+  "create_release": false,
+  "actions_tag": "v2.0.1"
+}

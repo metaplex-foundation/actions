@@ -1,0 +1,65 @@
+{
+  "actions_sha": "8fcadb6df757cba34aa8475373886eca9b6ce8cf",
+  "release_example": "release/fee-manager@0.1.1",
+  "main": {
+    "push_branches": [
+      "main"
+    ],
+    "pr_branches": [
+      "main"
+    ]
+  },
+  "install_anchor": true,
+  "sbf_tools_version": "4.0.0",
+  "rust_client_features": "--all-features",
+  "publish_js": {
+    "deploy_docs": true
+  },
+  "release": {
+    "default_git_ref": "main"
+  },
+  "deploy": {
+    "default_git_ref": "main",
+    "clusters": [
+      "devnet",
+      "mainnet-beta"
+    ],
+    "program_id_secrets": {
+      "fee-manager": "FEE_MANAGER_ID"
+    }
+  },
+  "verify": {
+    "clusters": [
+      "mainnet-beta",
+      "devnet"
+    ]
+  },
+  "programs": [
+    {
+      "name": "fee-manager",
+      "package": "fee-manager-program",
+      "library": "fee_manager",
+      "deploy": {
+        "program_id": "mgrfTeJh5VgHt67LQQVZ7U2gPY88En94QMWz64cV2AY",
+        "repo_visibility": "private",
+        "clusters": {
+          "devnet": {
+            "type": "squads-buffer",
+            "multisig": "8uJRAyx5zqMBDQR1PqYEFaApQQW92xmX9YVNPQcbMFEX",
+            "vault": "A1fwoBRjdppeT3WAB6B7FpDJonRtAfv8Xya2gdHrpM19"
+          },
+          "mainnet-beta": {
+            "type": "squads-buffer",
+            "multisig": "J8u9eYpTF8ohGHQD2TppCmvdAssVwFcW8FyDHU2nHwaX",
+            "vault": "2EALpzJh2Mp4GdruZwPRGGBjt464tq2Rp1RvkWa8FmT8"
+          }
+        }
+      }
+    }
+  ],
+  "dump_scripts": [
+    "configs/scripts/program/dump.sh",
+    "configs/scripts/program/dump-devnet.sh"
+  ],
+  "actions_tag": "v2.0.1"
+}
