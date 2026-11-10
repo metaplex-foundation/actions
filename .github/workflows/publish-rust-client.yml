@@ -90,8 +90,11 @@ jobs:
       - name: Hide the shared actions from git
         shell: bash
         # cargo-release refuses to run in a dirty tree and counts untracked
-        # files; the local exclude keeps .mpl-actions out of its view without
-        # a .gitignore entry in every repository.
+        # files; the local exclude keeps .mpl-actions out of its view, and
+        # out of the release pull request, without a .gitignore entry in
+        # every repository. The checkout itself must stay until the job ends:
+        # the composite actions used from it (the cargo-release cache) have
+        # post steps, and the runner reloads their action.yml to run them.
         run: echo ".mpl-actions/" >> .git/info/exclude
 
       - name: Load environment variables
@@ -187,10 +190,6 @@ jobs:
           crate_info
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
           echo "version=$VER" >> "$GITHUB_OUTPUT"
-
-      - name: Clean up
-        shell: bash
-        run: rm -rf .mpl-actions
 
       - name: Create release pull request
         if: ${{ !inputs.dry_run }}

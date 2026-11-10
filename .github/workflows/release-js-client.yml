@@ -62,9 +62,22 @@ jobs:
           NAME="$(node -p "require('./package.json').name")"
           # The release PR normally comes from publish-js-client, which has
           # already published. A hand-made release/js-client-* branch has not,
-          # and must not be tagged as a release.
-          if ! npm view "${NAME}@${VERSION}" version >/dev/null 2>&1; then
-            echo "::error::${NAME}@${VERSION} is not on npm; publish it before merging a release PR"
+          # and must not be tagged as a release. npm accepts a publish before
+          # the registry serves the version, and a release PR can be merged
+          # inside that window, so give the registry a few minutes.
+          ON_NPM=false
+          for attempt in $(seq 1 30); do
+            if npm view "${NAME}@${VERSION}" version >/dev/null 2>&1; then
+              ON_NPM=true
+              break
+            fi
+            if [ "$attempt" -eq 1 ]; then
+              echo "::notice::${NAME}@${VERSION} is not on npm yet; waiting up to five minutes for the registry"
+            fi
+            sleep 10
+          done
+          if [ "$ON_NPM" != true ]; then
+            echo "::error::${NAME}@${VERSION} is not on npm. If publish-js-client published it, the registry is still processing it: rerun this job once 'npm view ${NAME}@${VERSION}' shows it. Otherwise publish it before merging a release PR"
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
