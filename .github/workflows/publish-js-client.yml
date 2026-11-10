@@ -93,6 +93,16 @@ jobs:
           path: .mpl-actions
           persist-credentials: false
 
+      - name: Hide the shared actions from git
+        shell: bash
+        # The release PR must carry only the version bump, not the shared
+        # actions checkout. A local exclude keeps .mpl-actions out of
+        # create-pull-request's `git add` without a .gitignore entry in every
+        # repository. The checkout itself must stay until the job ends: the
+        # composite actions used from it (the dependency cache) have post
+        # steps, and the runner reloads their action.yml to run them.
+        run: echo ".mpl-actions/" >> .git/info/exclude
+
       - name: Load environment variables
         uses: ./.mpl-actions/load-env
 
@@ -170,36 +180,55 @@ jobs:
           # the registry holds this very tarball, though: the same version
           # computed from another commit must not get a release PR for code
           # that was never published.
-          if PUBLISHED="$(npm view "${NAME}@${VERSION}" dist.integrity 2>/dev/null)" && [ -n "$PUBLISHED" ]; then
-            LOCAL="$(npm pack --dry-run --json 2>/dev/null | jq -r '.[0].integrity')"
-            if [ "$PUBLISHED" = "$LOCAL" ]; then
-              # Skipping the publish also skips moving the dist-tag, which
-              # trusted publishing cannot do; refuse rather than leave the
-              # requested tag on another version.
-              # The tag is a literal key: `npm view pkg dist-tags.x.y` would read
-              # a dot in the tag as a path separator.
-              CURRENT="$(npm view "$NAME" dist-tags --json 2>/dev/null | jq -r --arg t "$TAG" '.[$t] // ""' || true)"
-              if [ "$CURRENT" != "$VERSION" ]; then
-                echo "::error::${NAME}@${VERSION} is already on npm, but dist-tag '${TAG}' points at '${CURRENT:-nothing}'; run: npm dist-tag add ${NAME}@${VERSION} ${TAG}, then rerun"
-                exit 1
-              fi
-              echo "::notice::${NAME}@${VERSION} is already on npm with this content; only the release pull request is created"
-              exit 0
+          #
+          # Returns 0 when this version is on npm with this content and the
+          # requested dist-tag, 1 when the registry does not show the version
+          # (yet); exits when it is there with other content or another tag.
+          already_published() {
+            local published local_integrity current
+            published="$(npm view "${NAME}@${VERSION}" dist.integrity 2>/dev/null)" || return 1
+            [ -n "$published" ] || return 1
+            local_integrity="$(npm pack --dry-run --json 2>/dev/null | jq -r '.[0].integrity')"
+            if [ "$published" != "$local_integrity" ]; then
+              echo "::error::${NAME}@${VERSION} is already on npm with different content (registry ${published}, this build ${local_integrity}); bump from the published source or pick another version"
+              exit 1
             fi
-            echo "::error::${NAME}@${VERSION} is already on npm with different content (registry ${PUBLISHED}, this build ${LOCAL}); bump from the published source or pick another version"
-            exit 1
-          fi
+            # Skipping the publish also skips moving the dist-tag, which
+            # trusted publishing cannot do; refuse rather than leave the
+            # requested tag on another version.
+            # The tag is a literal key: `npm view pkg dist-tags.x.y` would read
+            # a dot in the tag as a path separator.
+            current="$(npm view "$NAME" dist-tags --json 2>/dev/null | jq -r --arg t "$TAG" '.[$t] // ""' || true)"
+            if [ "$current" != "$VERSION" ]; then
+              echo "::error::${NAME}@${VERSION} is already on npm, but dist-tag '${TAG}' points at '${current:-nothing}'; run: npm dist-tag add ${NAME}@${VERSION} ${TAG}, then rerun"
+              exit 1
+            fi
+            echo "::notice::${NAME}@${VERSION} is already on npm with this content; only the release pull request is created"
+            return 0
+          }
+          if already_published; then exit 0; fi
           # npm refuses provenance from a private source repository; trusted
           # publishing itself works there, without the attestation.
           PROVENANCE=(--provenance)
           if [ "$REPO_PRIVATE" = "true" ]; then PROVENANCE=(); fi
-          npm publish --access public --tag "$TAG" "${PROVENANCE[@]}"
-
-      - name: Clean up
-        shell: bash
-        # The release PR must carry only the version bump, not the shared
-        # actions checkout.
-        run: rm -rf .mpl-actions
+          LOG="${RUNNER_TEMP:-/tmp}/npm-publish.log"
+          if npm publish --access public --tag "$TAG" "${PROVENANCE[@]}" 2>&1 | tee "$LOG"; then
+            exit 0
+          fi
+          # npm accepts a publish before the registry serves the version
+          # ("being processed"). A rerun inside that window cannot see the
+          # version above, publishes again and is refused with E409. Wait for
+          # the registry to show what the earlier attempt staged, then judge
+          # it like any other already published version.
+          if grep -q "previously staged version" "$LOG"; then
+            echo "::notice::${NAME}@${VERSION} was staged by an earlier attempt; waiting for the registry to serve it"
+            for _ in $(seq 1 30); do
+              sleep 10
+              if already_published; then exit 0; fi
+            done
+            echo "::error::${NAME}@${VERSION} was staged on npm by an earlier attempt and the registry does not serve it yet; rerun this job once 'npm view ${NAME}@${VERSION}' shows it"
+          fi
+          exit 1
 
       - name: Create release pull request
         if: inputs.create_release
