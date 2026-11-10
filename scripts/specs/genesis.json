@@ -1,5 +1,5 @@
 {
-  "actions_sha": "d23217f66ec0f17ef88cc9e85f2ee093076ac869",
+  "actions_sha": "e254cd631b3f153962713348579b5080ccc74cd2",
   "release_example": "release/genesis@0.9.2",
   "main": {
     "push_branches": [
@@ -99,5 +99,5 @@
     "clippy_deny_warnings": true
   },
   "rust_client_features": "--all-features",
-  "actions_tag": "v2.1.0"
+  "actions_tag": "v2.1.1"
 }
