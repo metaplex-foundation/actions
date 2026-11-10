@@ -1,5 +1,5 @@
 {
-  "actions_sha": "8fcadb6df757cba34aa8475373886eca9b6ce8cf",
+  "actions_sha": "e254cd631b3f153962713348579b5080ccc74cd2",
   "main": {
     "push_branches": [
       "main"
@@ -27,5 +27,5 @@
     }
   ],
   "create_release": false,
-  "actions_tag": "v2.0.1"
+  "actions_tag": "v2.1.1"
 }
