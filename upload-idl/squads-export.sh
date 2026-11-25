@@ -9,26 +9,38 @@
 #      initialise or update, close the buffer back to the submitter),
 #   3. sends the vault the rent those transactions will move into the metadata
 #      account, so the vault's own balance is left untouched,
-#   4. hands the buffer to the vault.
+#   4. hands the buffer to the vault,
+#   5. with PROPOSE=true, creates and activates the Squads proposals. It never
+#      approves them: the members still approve and execute, in order.
 #
-# The exported transactions are legacy transactions with at most one 10KB
-# extend each, which is what Squads v3 can execute through CPI.
+# The export has at most one 10KB extend per transaction, which is what a
+# Squads v3 vault can execute through CPI. It is then regrouped so that each
+# group fits one proposal (squads-proposals.mjs), and written to messages.txt
+# in the form the "Import Transaction" dialog of squads-deploy-ui accepts,
+# whether or not the proposals are created here.
 #
 # Environment:
 #   RPC_URL       cluster RPC endpoint
 #   PROGRAM_ID    program the IDL belongs to
 #   IDL_FILE      IDL to upload (JSON)
-#   VAULT         Squads vault, the program's upgrade authority
+#   MULTISIG      Squads v3 multisig
+#   VAULT         its vault, the program's upgrade authority
 #   BOT_KEYPAIR   path to the submitter keypair
 #   PM            path to the program-metadata CLI
-#   OUT_DIR       directory for transactions.txt, instructions.txt, result.env
+#   OUT_DIR       directory for messages.txt, proposals.txt, instructions.txt
+#                 and result.env
+#   PROPOSE       "true" to create the proposals (the submitter must be a
+#                 member of the multisig); anything else only writes messages
 #   ZLIB_BYTES    optional compressed IDL size, for the balance check
 #
 # Requires: curl, jq, node, solana, solana-keygen.
 
 set -euo pipefail
 
-: "${RPC_URL:?}" "${PROGRAM_ID:?}" "${IDL_FILE:?}" "${VAULT:?}" "${BOT_KEYPAIR:?}" "${PM:?}" "${OUT_DIR:?}"
+: "${RPC_URL:?}" "${PROGRAM_ID:?}" "${IDL_FILE:?}" "${MULTISIG:?}" "${VAULT:?}" "${BOT_KEYPAIR:?}" "${PM:?}" "${OUT_DIR:?}"
+
+TOOLS="$(cd "$(dirname "$0")" && pwd)"
+PROPOSE="${PROPOSE:-false}"
 
 export NO_COLOR=1
 ADDRESS='[1-9A-HJ-NP-Za-km-z]{32,44}'
@@ -92,7 +104,7 @@ metadata_funding() {
 }
 
 BOT="$(solana-keygen pubkey "$BOT_KEYPAIR")"
-METADATA="$(node "$(dirname "$0")/metadata-address.mjs" "$PROGRAM_ID")"
+METADATA="$(node "$TOOLS/metadata-address.mjs" "$PROGRAM_ID")"
 METADATA_SPACE="$(account_space "$METADATA")"
 BUFFER=""
 FUNDED=0
@@ -114,6 +126,14 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+
+# Before anything is paid for: the vault must be this multisig's, and a
+# submitter that is to propose must be one of its members.
+if [ "$PROPOSE" = "true" ]; then
+  node "$TOOLS/squads-proposals.mjs" --preflight --multisig "$MULTISIG" --vault "$VAULT" --keypair "$BOT_KEYPAIR" --rpc "$RPC_URL"
+else
+  node "$TOOLS/squads-proposals.mjs" --preflight --multisig "$MULTISIG" --vault "$VAULT"
+fi
 
 if [ -n "${ZLIB_BYTES:-}" ]; then
   ESTIMATE="$(rent $((ACCOUNT_HEADER + ZLIB_BYTES)))"
@@ -159,9 +179,13 @@ EXPORTED_METADATA="$(grep -oE "metadata: $ADDRESS" "$OUT_DIR/export.log" | head 
 [ "$EXPORTED_METADATA" = "$METADATA" ] ||
   fail "The export writes metadata account '$EXPORTED_METADATA', expected the canonical account $METADATA"
 # Each transaction is printed on the line after its "[Transaction #n]" header.
-awk '/^\[Transaction #[0-9]+\]$/ { if ((getline tx) > 0) print tx }' "$OUT_DIR/export.log" > "$OUT_DIR/transactions.txt"
-COUNT="$(wc -l < "$OUT_DIR/transactions.txt" | tr -d ' ')"
-[ "$COUNT" -gt 0 ] || fail "The export produced no transactions"
+awk '/^\[Transaction #[0-9]+\]$/ { if ((getline tx) > 0) print tx }' "$OUT_DIR/export.log" > "$OUT_DIR/exported.txt"
+[ -s "$OUT_DIR/exported.txt" ] || fail "The export produced no transactions"
+
+# Regroup the vault's instructions into proposals and write them as messages.
+node "$TOOLS/squads-proposals.mjs" --transactions "$OUT_DIR/exported.txt" --multisig "$MULTISIG" --vault "$VAULT" --out-dir "$OUT_DIR" >&2
+COUNT="$(wc -l < "$OUT_DIR/messages.txt" | tr -d ' ')"
+[ "$COUNT" -gt 0 ] || fail "The export produced no proposals"
 
 # The export sized its rent transfer from the metadata account as it was then.
 # If the account changed since this script first read it, the amount computed
@@ -185,12 +209,24 @@ echo "Handing the buffer to the vault" >&2
 "$PM" set-buffer-authority "$BUFFER" --new-authority "$VAULT" --keypair "$BOT_KEYPAIR" --rpc "$RPC_URL" >&2
 HANDED_OVER=true
 
-{
-  echo "buffer=$BUFFER"
-  echo "metadata=$METADATA"
-  echo "transactions=$COUNT"
-  echo "funding=$FUNDING"
-  echo "submitter=$BOT"
-} > "$OUT_DIR/result.env"
+# Written before proposing: from here on the messages are a way to finish the
+# upload by hand, whatever happens to the proposals.
+write_result() {
+  {
+    echo "buffer=$BUFFER"
+    echo "metadata=$METADATA"
+    echo "transactions=$COUNT"
+    echo "funding=$FUNDING"
+    echo "submitter=$BOT"
+    echo "proposed=$1"
+  } > "$OUT_DIR/result.env"
+}
+write_result false
+echo "Wrote $COUNT message(s) to $OUT_DIR/messages.txt" >&2
 
-echo "Exported $COUNT transaction(s) to $OUT_DIR/transactions.txt" >&2
+if [ "$PROPOSE" = "true" ]; then
+  echo "Creating $COUNT Squads proposal(s) in multisig $MULTISIG" >&2
+  node "$TOOLS/squads-proposals.mjs" --transactions "$OUT_DIR/exported.txt" --multisig "$MULTISIG" --vault "$VAULT" \
+    --out-dir "$OUT_DIR" --propose --keypair "$BOT_KEYPAIR" --rpc "$RPC_URL" >&2
+  write_result true
+fi
