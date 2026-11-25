@@ -24,7 +24,7 @@
 #   OUT_DIR       directory for transactions.txt, instructions.txt, result.env
 #   ZLIB_BYTES    optional compressed IDL size, for the balance check
 #
-# Requires: curl, jq, solana, solana-keygen.
+# Requires: curl, jq, node, solana, solana-keygen.
 
 set -euo pipefail
 
@@ -71,12 +71,28 @@ sol() {
   awk -v lamports="$1" 'BEGIN { printf "%.9f", lamports / 1000000000 }'
 }
 
+# Rent the vault's transactions move into the metadata account for an IDL
+# that takes $1 bytes of account space: all of it for a new account, the
+# difference for one that grows, nothing for one that shrinks.
+metadata_funding() {
+  local funding
+  funding="$(rent "$1")"
+  if [ "$METADATA_SPACE" != "missing" ]; then
+    funding=$((funding - $(rent "$METADATA_SPACE")))
+    [ "$funding" -gt 0 ] || funding=0
+  fi
+  echo "$funding"
+}
+
 BOT="$(solana-keygen pubkey "$BOT_KEYPAIR")"
+METADATA="$(node "$(dirname "$0")/metadata-address.mjs" "$PROGRAM_ID")"
+METADATA_SPACE="$(account_space "$METADATA")"
 BUFFER=""
+FUNDED=0
 HANDED_OVER=false
 
 # A buffer the vault never received is of no use to anyone: give its rent
-# back to the submitter.
+# back to the submitter. Rent already sent to the vault stays there.
 cleanup() {
   local status=$?
   trap - EXIT
@@ -84,6 +100,9 @@ cleanup() {
     echo "Closing buffer $BUFFER after the failure" >&2
     "$PM" close-buffer "$BUFFER" --keypair "$BOT_KEYPAIR" --rpc "$RPC_URL" >&2 ||
       echo "::warning::Could not close buffer $BUFFER. Close it with: program-metadata close-buffer $BUFFER"
+    if [ "$FUNDED" -gt 0 ]; then
+      echo "::warning::Vault $VAULT already received $(sol "$FUNDED") SOL for the metadata account's rent. The next run sends that amount again, so the vault keeps this one as a surplus to withdraw."
+    fi
   fi
   exit "$status"
 }
@@ -93,7 +112,7 @@ if [ -n "${ZLIB_BYTES:-}" ]; then
   ESTIMATE="$(rent $((ACCOUNT_HEADER + ZLIB_BYTES)))"
   # Rent for the buffer (returned when the vault closes it) plus the rent
   # sent to the vault for the metadata account.
-  REQUIRED=$((2 * ESTIMATE + FEE_MARGIN))
+  REQUIRED=$((ESTIMATE + $(metadata_funding $((ACCOUNT_HEADER + ZLIB_BYTES))) + FEE_MARGIN))
   AVAILABLE="$(balance "$BOT")"
   if [ "$AVAILABLE" -lt "$REQUIRED" ]; then
     fail "Submitter $BOT holds $(sol "$AVAILABLE") SOL, the upload needs about $(sol "$REQUIRED") SOL ($(sol "$ESTIMATE") of it comes back when the vault closes the buffer)"
@@ -128,26 +147,22 @@ echo "Exporting the transactions for vault $VAULT" >&2
 export_transactions base58 > "$OUT_DIR/export.log" 2>&1 || { cat "$OUT_DIR/export.log" >&2; fail "program-metadata write --export failed"; }
 export_transactions instruction-list > "$OUT_DIR/instructions.txt" 2>&1 || { cat "$OUT_DIR/instructions.txt" >&2; fail "program-metadata write --export failed"; }
 
-METADATA="$(grep -oE "metadata: $ADDRESS" "$OUT_DIR/export.log" | head -n 1 | awk '{print $2}' || true)"
-[ -n "$METADATA" ] || fail "Could not read the metadata account address from the export output"
+EXPORTED_METADATA="$(grep -oE "metadata: $ADDRESS" "$OUT_DIR/export.log" | head -n 1 | awk '{print $2}' || true)"
+[ "$EXPORTED_METADATA" = "$METADATA" ] ||
+  fail "The export writes metadata account '$EXPORTED_METADATA', expected the canonical account $METADATA"
 # Each transaction is printed on the line after its "[Transaction #n]" header.
 awk '/^\[Transaction #[0-9]+\]$/ { if ((getline tx) > 0) print tx }' "$OUT_DIR/export.log" > "$OUT_DIR/transactions.txt"
 COUNT="$(wc -l < "$OUT_DIR/transactions.txt" | tr -d ' ')"
 [ "$COUNT" -gt 0 ] || fail "The export produced no transactions"
 
-# The first transaction moves this rent from the vault to the metadata
-# account: all of it for a new account, the difference for one that grows.
-METADATA_SPACE="$(account_space "$METADATA")"
-FUNDING="$(rent "$BUFFER_SPACE")"
-if [ "$METADATA_SPACE" != "missing" ]; then
-  FUNDING=$((FUNDING - $(rent "$METADATA_SPACE")))
-  [ "$FUNDING" -gt 0 ] || FUNDING=0
-fi
+# The first transaction moves this rent from the vault to the metadata account.
+FUNDING="$(metadata_funding "$BUFFER_SPACE")"
 
 if [ "$FUNDING" -gt 0 ]; then
   echo "Sending $(sol "$FUNDING") SOL to the vault for the metadata account's rent" >&2
   solana transfer --url "$RPC_URL" --keypair "$BOT_KEYPAIR" --fee-payer "$BOT_KEYPAIR" \
     --allow-unfunded-recipient "$VAULT" "$(sol "$FUNDING")" >&2
+  FUNDED="$FUNDING"
 fi
 
 echo "Handing the buffer to the vault" >&2

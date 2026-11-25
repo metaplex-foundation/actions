@@ -127,6 +127,7 @@ jobs:
           DEPLOY_JSON: ${{ steps.program.outputs.deploy }}
           CLUSTER: ${{ inputs.cluster }}
           PROGRAM: ${{ inputs.program }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
           case "$CLUSTER" in
@@ -146,11 +147,18 @@ jobs:
               ;;
             *) echo "::error::cluster '$CLUSTER' has unknown deploy type '$TYPE'"; exit 1 ;;
           esac
+          # Only a Squads write installs the Solana CLI (to fund the vault), so
+          # a repository without the pins can still dry-run and upload directly.
+          DEPLOY_SOLANA="${DEPLOY_SOLANA_VERSION:-${SOLANA_VERSION:-}}"
+          if [ "$TYPE" != "direct" ] && [ "$DRY_RUN" != "true" ] && [ -z "$DEPLOY_SOLANA" ]; then
+            echo "::error::Set SOLANA_VERSION or DEPLOY_SOLANA_VERSION in .github/.env: the Squads upload needs the Solana CLI"
+            exit 1
+          fi
           {
             echo "program_id=$PROGRAM_ID"
             echo "type=$TYPE"
             echo "vault=$VAULT"
-            echo "deploy_solana=${DEPLOY_SOLANA_VERSION:-$SOLANA_VERSION}"
+            echo "deploy_solana=$DEPLOY_SOLANA"
           } >> "$GITHUB_OUTPUT"
 
       - name: Locate the IDL
@@ -361,8 +369,18 @@ jobs:
             echo "| Rent | ${RENT_SOL:+about $RENT_SOL SOL} |"
             echo "| On chain before this run | $([ "${EXISTS:-}" = "true" ] && echo "an IDL" || echo "no IDL")$([ "${CHANGED:-}" = "false" ] && echo ", identical") |"
             echo
+            # result.env exists once the buffer is with the vault. From then on
+            # the transactions are the only way to use it, so they are listed
+            # even if a later step failed.
+            SHOW_SQUADS=false
             if [ "$JOB_STATUS" != "success" ]; then
-              echo "**The job did not finish ($JOB_STATUS).** Nothing below this line was done."
+              if [ -f "$SQUADS_DIR/result.env" ] && [ -s "$SQUADS_DIR/transactions.txt" ]; then
+                echo "**The job did not finish ($JOB_STATUS), but the buffer was prepared and handed to the vault first.** The transactions below are valid: use them instead of running the workflow again."
+                echo
+                SHOW_SQUADS=true
+              else
+                echo "**The job did not finish ($JOB_STATUS).**"
+              fi
             elif [ "${CHANGED:-}" = "false" ]; then
               echo "The on-chain IDL already matches. Nothing was written."
             elif [ "$DRY_RUN" = "true" ]; then
@@ -370,6 +388,9 @@ jobs:
             elif [ "$TYPE" = "direct" ]; then
               echo "The IDL was written and read back. The Explorer caches IDLs for up to 30 minutes."
             else
+              SHOW_SQUADS=true
+            fi
+            if [ "$SHOW_SQUADS" = "true" ]; then
               # shellcheck disable=SC1091
               . "$SQUADS_DIR/result.env"
               echo "### Squads transactions"

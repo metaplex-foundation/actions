@@ -76,6 +76,27 @@ test('no placeholder survives the conversion', () => {
     assert.doesNotMatch(json, /definedTypeLinkNode/);
 });
 
+test('a user type named like a placeholder keeps its own definition', () => {
+    const idl = fixture('shank-fixed-size-option.json');
+    // The name the first fixedSizeOption placeholder used to get.
+    idl.types = [
+        {
+            name: 'IdlToCodamaFixedSizeOption0',
+            type: { kind: 'struct', fields: [{ name: 'flag', type: 'bool' }] },
+        },
+    ];
+    idl.accounts[0].type.fields.push({ name: 'settings', type: { defined: 'IdlToCodamaFixedSizeOption0' } });
+    const { content } = convertIdl(idl);
+    const record = content.program.accounts.find((a) => a.name === 'record');
+    assert.deepEqual(field(record.data, 'settings'), {
+        kind: 'definedTypeLinkNode',
+        name: 'idlToCodamaFixedSizeOption0',
+    });
+    assert.equal(field(record.data, 'delegate').kind, 'zeroableOptionTypeNode');
+    assert.equal(field(record.data, 'expiry').kind, 'zeroableOptionTypeNode');
+    assert.ok(content.program.definedTypes.some((t) => t.name === 'idlToCodamaFixedSizeOption0'));
+});
+
 test('the input IDL is not modified', () => {
     const idl = fixture('shank-fixed-size-option.json');
     const before = JSON.stringify(idl);

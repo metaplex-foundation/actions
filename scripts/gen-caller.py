@@ -765,11 +765,17 @@ def gen_upload_idl():
     ]
     secrets = ["    secrets:", f"      RPC_URL: {rpc_expr(clusters)}"]
     if "direct" in types:
+        # Keep the mappings deployer_expr() would match for these clusters: an
+        # exact name for devnet and mainnet-beta, a prefix for any other key.
+        def applies(key):
+            if key in IDL_CLUSTERS:
+                return key in clusters
+            return any(c.startswith(key) for c in clusters)
         ds = dep.get("deployer_secrets", {})
         if all(isinstance(v, str) for v in ds.values()):
-            ds = {k: v for k, v in ds.items() if k in clusters}
+            ds = {k: v for k, v in ds.items() if applies(k)}
         else:
-            ds = {prog: {k: v for k, v in m.items() if k in clusters} for prog, m in ds.items() if prog in programs}
+            ds = {prog: {k: v for k, v in m.items() if applies(k)} for prog, m in ds.items() if prog in programs}
             ds = {prog: m for prog, m in ds.items() if m}
         de = deployer_expr({"deployer_secrets": ds})
         if not de:

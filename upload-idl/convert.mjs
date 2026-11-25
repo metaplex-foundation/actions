@@ -21,24 +21,54 @@ function isFixedSizeOption(value) {
 }
 
 /**
+ * Every type name the IDL declares or refers to, as Codama will spell it. A
+ * placeholder must not share a name with one of these, or the link to the
+ * real type would be replaced along with the placeholder's.
+ */
+function collectTypeNames(value, names = new Set()) {
+    if (Array.isArray(value)) {
+        value.forEach((item) => collectTypeNames(item, names));
+    } else if (typeof value === 'object' && value !== null) {
+        for (const [key, item] of Object.entries(value)) {
+            if ((key === 'defined' || key === 'name') && typeof item === 'string') names.add(camelCase(item));
+            collectTypeNames(item, names);
+        }
+    }
+    return names;
+}
+
+function placeholderName(placeholders, reserved) {
+    for (let index = placeholders.length; ; index++) {
+        const name = `${PLACEHOLDER_PREFIX}${index}`;
+        if (!reserved.has(camelCase(name))) {
+            reserved.add(camelCase(name));
+            return name;
+        }
+    }
+}
+
+/**
  * Shank's `fixedSizeOption` (an option encoded as a sentinel value instead of
  * a prefix) is unknown to the Anchor converter. Swap each one for a link to a
  * placeholder type and remember what it stood for; inner types are handled
  * first so a nested option is registered before the one that contains it.
  */
-function extractFixedSizeOptions(value, placeholders) {
-    if (Array.isArray(value)) return value.map((item) => extractFixedSizeOptions(item, placeholders));
+function extractFixedSizeOptions(value, placeholders, reserved) {
+    if (Array.isArray(value)) return value.map((item) => extractFixedSizeOptions(item, placeholders, reserved));
     if (typeof value !== 'object' || value === null) return value;
     if (isFixedSizeOption(value)) {
         const { inner, sentinel } = value.fixedSizeOption;
         if (!Array.isArray(sentinel) || !sentinel.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
             throw new Error(`fixedSizeOption has an invalid sentinel: ${JSON.stringify(sentinel)}`);
         }
-        const name = `${PLACEHOLDER_PREFIX}${placeholders.length}`;
-        placeholders.push({ name, inner: extractFixedSizeOptions(inner, placeholders), sentinel });
+        const resolvedInner = extractFixedSizeOptions(inner, placeholders, reserved);
+        const name = placeholderName(placeholders, reserved);
+        placeholders.push({ name, inner: resolvedInner, sentinel });
         return { defined: name };
     }
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, extractFixedSizeOptions(item, placeholders)]));
+    return Object.fromEntries(
+        Object.entries(value).map(([key, item]) => [key, extractFixedSizeOptions(item, placeholders, reserved)]),
+    );
 }
 
 function zeroValueNode(sentinel) {
@@ -81,6 +111,7 @@ function shankToCodama(idl) {
             types: idl.types ?? [],
         },
         placeholders,
+        collectTypeNames(idl),
     );
     const bare = rootNodeFromAnchorWithoutDefaultVisitor(normalised);
     // The default visitor computes account sizes, so it must see real types.
