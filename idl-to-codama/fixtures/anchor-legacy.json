@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "name": "mpl_hybrid",
+  "instructions": [
+    {
+      "name": "capture",
+      "accounts": [{ "name": "owner", "isMut": true, "isSigner": true }],
+      "args": []
+    }
+  ],
+  "metadata": {
+    "address": "MPL4o4wMzndgh8T1NVDxELQCj5UQfYTYEkabX3wNKtb",
+    "origin": "anchor",
+    "binaryVersion": "0.29.0",
+    "libVersion": "0.29.0"
+  }
+}
