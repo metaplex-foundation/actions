@@ -1,5 +1,5 @@
 {
-  "actions_sha": "d5865a41969cf89ed4736c6cffc36c3ac50782c0",
+  "actions_sha": "7c53cc549762ac481eff98439af60a9f26c3bed1",
   "release_example": "release/mpl-agent-identity@0.1.0",
   "main": {
     "push_branches": [
@@ -195,5 +195,5 @@
       }
     }
   ],
-  "actions_tag": "v2.2.0"
+  "actions_tag": "v2.2.1"
 }
