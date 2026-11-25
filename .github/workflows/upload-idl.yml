@@ -258,7 +258,8 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Install Solana
-        if: ${{ !inputs.dry_run && steps.compare.outputs.changed == 'true' }}
+        # Only the Squads path needs the CLI, to fund the vault.
+        if: ${{ !inputs.dry_run && steps.compare.outputs.changed == 'true' && steps.plan.outputs.type != 'direct' }}
         uses: ./.mpl-actions/install-solana
         with:
           version: ${{ steps.plan.outputs.deploy_solana }}
@@ -354,7 +355,7 @@ jobs:
             echo
             echo "| | |"
             echo "|---|---|"
-            echo "| Program | [\`$PROGRAM_ID\`](https://explorer.solana.com/address/$PROGRAM_ID/idl$QUERY) |"
+            echo "| Program | [\`$PROGRAM_ID\`](https://explorer.solana.com/address/$PROGRAM_ID$QUERY) |"
             echo "| Source | \`${SOURCE:-not found}\` at \`$GIT_REF\` |"
             echo "| Uploaded as | ${FORMAT:-unknown}${ZLIB_BYTES:+, $ZLIB_BYTES bytes compressed} |"
             echo "| Rent | ${RENT_SOL:+about $RENT_SOL SOL} |"
