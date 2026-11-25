@@ -5,7 +5,7 @@ Usage: python3 -I scripts/gen-caller.py <spec.json> <repo-dir>
 
 Writes .github/programs.json and .github/workflows/{main,publish-js-client,
 publish-rust-client,release-js-client,release-rust-client,create-release,
-deploy-program,verify-program}.yml according to the spec. Existing files at
+deploy-program,verify-program,upload-idl}.yml according to the spec. Existing files at
 those paths are overwritten; nothing else is touched.
 """
 import json
@@ -715,6 +715,74 @@ def gen_verify():
     return "\n".join(out).rstrip("\n") + "\n"
 
 
+# Clusters that have the Program Metadata program.
+IDL_CLUSTERS = ["devnet", "mainnet-beta"]
+
+
+def gen_upload_idl():
+    """None when no program deploys to a cluster the IDL can be uploaded on."""
+    s = SPEC
+    dep = s["deploy"]
+    clusters = [c for c in IDL_CLUSTERS if c in dep["clusters"]]
+    targets = {p["name"]: [p["deploy"]["clusters"][c].get("type") for c in clusters if c in p["deploy"].get("clusters", {})]
+               for p in s["programs"] if p.get("deploy", {}).get("program_id")}
+    programs = [name for name, types in targets.items() if types]
+    if not clusters or not programs:
+        return None
+    types = {t for name in programs for t in targets[name]}
+    out = [
+        "name: Upload IDL\n",
+        "on:",
+        "  workflow_dispatch:",
+        "    inputs:",
+        "      git_ref:",
+        "        description: Release tag, commit hash, or branch whose IDL matches the deployed program",
+        "        required: true",
+        "        type: string",
+        "      program:",
+        "        description: Program",
+        "        required: true",
+        f"        default: {programs[0]}",
+        "        type: choice",
+        f"        options: {yaml_list(programs)}",
+        "      cluster:",
+        "        description: Cluster environment",
+        "        required: true",
+        f"        default: {clusters[0]}",
+        "        type: choice",
+        f"        options: {yaml_list(clusters)}",
+        "      dry_run:",
+        "        description: Dry run (convert and compare with the on-chain IDL, write nothing)",
+        "        required: false",
+        "        type: boolean",
+        "        default: true",
+        "",
+        "permissions: {}",
+        "",
+        concurrency("upload-idl-${{ inputs.program }}-${{ inputs.cluster }}",
+                    "One upload per program and cluster at a time; a running upload is never cancelled."),
+        "jobs:",
+    ]
+    secrets = ["    secrets:", f"      RPC_URL: {rpc_expr(clusters)}"]
+    if "direct" in types:
+        ds = dep.get("deployer_secrets", {})
+        if all(isinstance(v, str) for v in ds.values()):
+            ds = {k: v for k, v in ds.items() if k in clusters}
+        else:
+            ds = {prog: {k: v for k, v in m.items() if k in clusters} for prog, m in ds.items() if prog in programs}
+            ds = {prog: m for prog, m in ds.items() if m}
+        de = deployer_expr({"deployer_secrets": ds})
+        if not de:
+            sys.exit("upload-idl: a direct deploy on devnet or mainnet-beta needs deploy.deployer_secrets for that cluster")
+        secrets.append(f"      DEPLOYER_KEYPAIR: {de}")
+    if types - {"direct"}:
+        secrets.append(f"      SQUADS_BOT_KEY: ${{{{ secrets.{dep.get('squads_bot_secret') or 'SQUADS_BOT_KEY'} }}}}")
+    out.append(job("upload", "IDL", "upload-idl", perms=["contents: read"], secrets_block="\n".join(secrets),
+                   with_pairs=[("program", "${{ inputs.program }}"), ("cluster", "${{ inputs.cluster }}"),
+                               ("git_ref", "${{ inputs.git_ref }}"), ("dry_run", "${{ inputs.dry_run }}")]))
+    return "\n".join(out).rstrip("\n") + "\n"
+
+
 def gen_programs_json():
     s = SPEC
     doc = {"$comment": "Program descriptors for the shared CI in metaplex-foundation/actions. Toolchain pins live in .github/.env.",
@@ -754,6 +822,9 @@ def main():
         files[wf / "deploy-program.yml"] = gen_deploy()
         if SPEC.get("verify") is not False:
             files[wf / "verify-program.yml"] = gen_verify()
+        upload_idl = gen_upload_idl() if SPEC.get("upload_idl") is not False else None
+        if upload_idl:
+            files[wf / "upload-idl.yml"] = upload_idl
     if SPEC.get("js_client", True):
         files[wf / "publish-js-client.yml"] = gen_publish_js()
         files[wf / "release-js-client.yml"] = gen_release("js")

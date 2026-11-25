@@ -32,6 +32,7 @@ Per-repository facts stay in the calling repository in two files:
 | `create-release.yml` | Next `release/<tag>@x.y.z` tag with the `.so` attached | program-builds artifact |
 | `deploy-program.yml` | Direct or Squads deploy per cluster, with the verified-build PDA bundled on devnet/mainnet | programs.json `deploy`, secrets |
 | `verify-program.yml` | Rebuild, compare the on-chain hash, submit the OtterSec job | programs.json `deploy`, secrets |
+| `upload-idl.yml` | Publish the IDL to the Program Metadata account the Solana Explorer reads, converting Shank IDLs to Codama | `idls/<name>.json`, programs.json `deploy`, secrets |
 
 Workflows are not nested: the caller's `main.yml` wires them together so
 every reference is a pinned commit. The job graph keeps the critical path
@@ -52,7 +53,7 @@ consuming repositories live in `scripts/specs/`; bump `actions_sha` and
 
 ### programs.json
 
-Every shared workflow that takes a `git_ref` (`build-programs`, `test-programs`, `create-release`, `deploy-program`, `verify-program`) reads `programs.json` from the revision the run is for (`github.sha`), not from `git_ref`, so a release tag cut before the file existed still builds and deploys with today's cluster configuration. `.github/.env` is read from `git_ref`, because toolchain pins belong with the code they build; the one exception is the host tools (`DEPLOY_SOLANA_VERSION`, `SOLANA_VERIFY_VERSION`, `SOLANA_VERIFY_RUST_VERSION`), which `build-programs`, `deploy-program` and `verify-program` take from `github.sha` so that an old release can still be built and verified with a verifier that compiles today. The Squads helper crate (`configs/scripts/program/squads-verified-upgrade`) is deploy tooling and comes from `github.sha` as well.
+Every shared workflow that takes a `git_ref` (`build-programs`, `test-programs`, `create-release`, `deploy-program`, `verify-program`, `upload-idl`) reads `programs.json` from the revision the run is for (`github.sha`), not from `git_ref`, so a release tag cut before the file existed still builds and deploys with today's cluster configuration. `.github/.env` is read from `git_ref`, because toolchain pins belong with the code they build; the one exception is the host tools (`DEPLOY_SOLANA_VERSION`, `SOLANA_VERIFY_VERSION`, `SOLANA_VERIFY_RUST_VERSION`), which `build-programs`, `deploy-program` and `verify-program` take from `github.sha` so that an old release can still be built and verified with a verifier that compiles today. The Squads helper crate (`configs/scripts/program/squads-verified-upgrade`) is deploy tooling and comes from `github.sha` as well.
 
 The generated dispatch workflows resolve the `git_ref` they were given to one commit in their `check_tag` job and pass that commit to every build, test, publish, release and deploy job, so a branch that moves during the run, or a branch named like a tag, cannot make one job work on different source than another. `deploy-program` additionally takes the release tag the commit was resolved from (`release_tag`) to download that release's asset instead of the build artifact.
 
@@ -96,6 +97,33 @@ Only `name` is required. Defaults follow the template layout:
 | `deploy.program_id` | | Expected pubkey; deploy fails if the keypair secret derives another one |
 | `deploy.clusters.<c>.type` | | `direct` (DEPLOYER_KEYPAIR signs), `squads` (buffer + proposal) or `squads-buffer` (buffer only, upgrade proposed by hand from the job summary) |
 | `dump_scripts` (top level) | `["configs/scripts/program/dump.sh"]` | Scripts run after the build with the output directory as `$1` |
+
+### Uploading IDLs
+
+`upload-idl.yml` is dispatch-only. It takes the file in `idls/` at `git_ref`
+whose address is the program's `deploy.program_id` and publishes it to the
+canonical `idl` account of the
+[Program Metadata](https://github.com/solana-program/program-metadata)
+program, which exists on devnet and mainnet-beta. Use the `git_ref` that was
+deployed, so the IDL describes the program that is on chain.
+
+- A Shank IDL is converted to a Codama root node (`upload-idl/convert.mjs`).
+  The Explorer decodes any other format with Anchor discriminators, which a
+  Shank program does not use. Anchor IDLs are uploaded unchanged.
+- `dry_run` (the default) converts the IDL, attaches it to the run and
+  compares it with the chain. A run whose IDL already matches writes nothing.
+- On a `direct` cluster `DEPLOYER_KEYPAIR` writes the account. Only the
+  upgrade authority can: the CLI refuses any other key.
+- On a `squads` or `squads-buffer` cluster `SQUADS_BOT_KEY` writes the IDL to
+  a buffer, sends the vault the rent for the metadata account, and hands the
+  buffer to the vault. The job summary lists base58 legacy transactions to
+  import into Squads, in order; the last one closes the buffer and returns
+  its rent to the bot key. The bot key needs about twice the rent shown in a
+  dry run.
+
+The converter and the Program Metadata CLI are pinned by
+`upload-idl/package-lock.json`. Stay on Codama 1.x: that is what the Explorer
+parses. Run the converter's tests with `npm ci && npm test` in `upload-idl/`.
 
 ### Pinning and upgrades
 
