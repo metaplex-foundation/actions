@@ -12,11 +12,13 @@ name: Upload IDL
 # Only the program's upgrade authority can write the canonical account, so
 # the upload follows the cluster's deploy type in `.github/programs.json`:
 #
-#   direct                  written by DEPLOYER_KEYPAIR.
-#   squads, squads-buffer   SQUADS_BOT_KEY writes the IDL to a buffer, sends
-#                           the vault the rent for the metadata account and
-#                           hands the buffer over. The job summary lists the
-#                           transactions to import into Squads.
+#   direct          written by DEPLOYER_KEYPAIR.
+#   squads          SQUADS_BOT_KEY writes the IDL to a buffer, sends the vault
+#                   the rent for the metadata account, hands the buffer over
+#                   and creates the Squads proposals. The members approve and
+#                   execute them, in order.
+#   squads-buffer   the same without the proposals: the job summary lists
+#                   messages to import into Squads by hand.
 #
 # Program Metadata is deployed on devnet and mainnet-beta only.
 #
@@ -140,10 +142,12 @@ jobs:
           [ -n "$CFG" ] || { echo "::error::cluster '$CLUSTER' is not configured under deploy.clusters in .github/programs.json"; exit 1; }
           TYPE="$(jq -r '.type' <<< "$CFG")"
           VAULT="$(jq -r '.vault // ""' <<< "$CFG")"
+          MULTISIG="$(jq -r '.multisig // ""' <<< "$CFG")"
           case "$TYPE" in
             direct) ;;
             squads|squads-buffer)
               [ -n "$VAULT" ] || { echo "::error::cluster '$CLUSTER' has deploy type '$TYPE' but no vault"; exit 1; }
+              [ -n "$MULTISIG" ] || { echo "::error::cluster '$CLUSTER' has deploy type '$TYPE' but no multisig"; exit 1; }
               ;;
             *) echo "::error::cluster '$CLUSTER' has unknown deploy type '$TYPE'"; exit 1 ;;
           esac
@@ -158,6 +162,7 @@ jobs:
             echo "program_id=$PROGRAM_ID"
             echo "type=$TYPE"
             echo "vault=$VAULT"
+            echo "multisig=$MULTISIG"
             echo "deploy_solana=$DEPLOY_SOLANA"
           } >> "$GITHUB_OUTPUT"
 
@@ -319,22 +324,28 @@ jobs:
           RPC_URL: ${{ secrets.RPC_URL }}
           PROGRAM_ID: ${{ steps.plan.outputs.program_id }}
           IDL_FILE: ${{ steps.convert.outputs.file }}
+          MULTISIG: ${{ steps.plan.outputs.multisig }}
           VAULT: ${{ steps.plan.outputs.vault }}
           ZLIB_BYTES: ${{ steps.convert.outputs.zlib_bytes }}
+          # A squads-buffer cluster gets no proposals from CI, as for deploys.
+          PROPOSE: ${{ steps.plan.outputs.type == 'squads' }}
         run: |
           set -euo pipefail
           BOT_KEYPAIR="$RUNNER_TEMP/upload-idl-keys/signer.json" OUT_DIR="$RUNNER_TEMP/upload-idl/squads" \
             .mpl-actions/upload-idl/squads-export.sh
 
-      - name: Upload the Squads transactions
-        if: ${{ !inputs.dry_run && steps.compare.outputs.changed == 'true' && steps.plan.outputs.type != 'direct' }}
+      - name: Upload the Squads messages
+        # Also after a failure: once the buffer is with the vault, the
+        # messages are how the upload can still be finished.
+        if: ${{ !cancelled() && !inputs.dry_run && steps.compare.outputs.changed == 'true' && steps.plan.outputs.type != 'direct' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: squads-transactions-${{ inputs.program }}-${{ inputs.cluster }}
           path: |
-            ${{ runner.temp }}/upload-idl/squads/transactions.txt
+            ${{ runner.temp }}/upload-idl/squads/messages.txt
+            ${{ runner.temp }}/upload-idl/squads/proposals.txt
             ${{ runner.temp }}/upload-idl/squads/instructions.txt
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Summary
         if: always()
@@ -348,6 +359,7 @@ jobs:
           PROGRAM_ID: ${{ steps.plan.outputs.program_id }}
           TYPE: ${{ steps.plan.outputs.type }}
           VAULT: ${{ steps.plan.outputs.vault }}
+          MULTISIG: ${{ steps.plan.outputs.multisig }}
           SOURCE: ${{ steps.idl.outputs.source }}
           FORMAT: ${{ steps.convert.outputs.format }}
           ZLIB_BYTES: ${{ steps.convert.outputs.zlib_bytes }}
@@ -370,12 +382,12 @@ jobs:
             echo "| On chain before this run | $([ "${EXISTS:-}" = "true" ] && echo "an IDL" || echo "no IDL")$([ "${CHANGED:-}" = "false" ] && echo ", identical") |"
             echo
             # result.env exists once the buffer is with the vault. From then on
-            # the transactions are the only way to use it, so they are listed
+            # the messages are a way to finish the upload, so they are listed
             # even if a later step failed.
             SHOW_SQUADS=false
             if [ "$JOB_STATUS" != "success" ]; then
-              if [ -f "$SQUADS_DIR/result.env" ] && [ -s "$SQUADS_DIR/transactions.txt" ]; then
-                echo "**The job did not finish ($JOB_STATUS), but the buffer was prepared and handed to the vault first.** The transactions below are valid: use them instead of running the workflow again."
+              if [ -f "$SQUADS_DIR/result.env" ] && [ -s "$SQUADS_DIR/messages.txt" ]; then
+                echo "**The job did not finish ($JOB_STATUS), but the buffer was prepared and handed to the vault first.** Do not run the workflow again for this upload: finish it from what is listed below."
                 echo
                 SHOW_SQUADS=true
               else
@@ -393,27 +405,52 @@ jobs:
             if [ "$SHOW_SQUADS" = "true" ]; then
               # shellcheck disable=SC1091
               . "$SQUADS_DIR/result.env"
-              echo "### Squads transactions"
+              echo "### Squads"
               echo
-              echo "The IDL is in buffer \`$buffer\`, now owned by vault \`$VAULT\`."
+              echo "The IDL is in buffer \`$buffer\`, now owned by vault \`$VAULT\` of multisig \`$MULTISIG\`."
               echo "The vault received $(awk -v lamports="$funding" 'BEGIN { printf "%.9f", lamports / 1000000000 }') SOL from \`$submitter\` for the rent of metadata account \`$metadata\`."
               echo
-              echo "Import the $transactions transaction(s) below into Squads **in this order** and execute each before the next."
-              echo "They are base58 legacy transactions whose signer is the vault. The last one closes the buffer and returns its rent to \`$submitter\`."
-              echo "A large IDL grows the account 10KB at a time, so some transactions are identical: import every one of them."
+              CREATED=0
+              if [ -s "$SQUADS_DIR/proposals.txt" ]; then
+                CREATED="$(wc -l < "$SQUADS_DIR/proposals.txt" | tr -d ' ')"
+              fi
+              if [ "$CREATED" -gt 0 ]; then
+                echo "\`$submitter\` created these proposals. **Approve and execute them in this order**, each one before the next, on the Transactions page of the Squads UI:"
+                echo
+                echo "| Order | Proposal | Account |"
+                echo "|---|---|---|"
+                N=0
+                while read -r INDEX ACCOUNT; do
+                  N=$((N + 1))
+                  echo "| $N | #$INDEX | \`$ACCOUNT\` |"
+                done < "$SQUADS_DIR/proposals.txt"
+                echo
+              fi
+              if [ "$CREATED" -lt "$transactions" ]; then
+                if [ "$CREATED" -gt 0 ]; then
+                  echo "**Only $CREATED of $transactions proposals were created.** Import the remaining messages below, from message $((CREATED + 1)) on."
+                else
+                  echo "No proposals were created by this run. Import the $transactions message(s) below on the Transactions page of the Squads UI (Import Transaction), **in this order**, executing each before the next."
+                fi
+                echo
+              fi
+              echo "The last proposal closes the buffer and returns its rent to \`$submitter\`."
+              echo "A large IDL grows the account 10KB at a time, so some proposals are identical: every one of them is needed."
               echo "They were built against the current on-chain state: run this workflow again if the IDL account changes before they execute."
               echo
-              N=0
-              while IFS= read -r TRANSACTION; do
-                N=$((N + 1))
-                echo "**Transaction $N**"
-                echo
-                echo '```'
-                echo "$TRANSACTION"
-                echo '```'
-                echo
-              done < "$SQUADS_DIR/transactions.txt"
-              echo "<details><summary>Instructions</summary>"
+              if [ "$CREATED" -lt "$transactions" ]; then
+                N=0
+                while IFS= read -r MESSAGE; do
+                  N=$((N + 1))
+                  echo "**Message $N**"
+                  echo
+                  echo '```'
+                  echo "$MESSAGE"
+                  echo '```'
+                  echo
+                done < "$SQUADS_DIR/messages.txt"
+              fi
+              echo "<details><summary>Instructions as exported by the Program Metadata CLI</summary>"
               echo
               echo '```'
               cat "$SQUADS_DIR/instructions.txt"

@@ -1,0 +1,143 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+
+import { AccountRole, getBase58Encoder, getCompiledTransactionMessageDecoder } from '@solana/kit';
+
+import {
+    activateTransactionInstruction,
+    addInstructionInstruction,
+    approveTransactionInstruction,
+    createTransactionInstruction,
+    findAuthorityPda,
+    findInstructionPda,
+    findTransactionPda,
+    instructionsFromExport,
+    PROPOSAL_SIZE_LIMIT,
+    proposalSize,
+    readMultisig,
+    splitForProposals,
+    toImportableMessage,
+} from './squads.mjs';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const exported = readFileSync(join(here, 'fixtures', 'exported-transactions.txt'), 'utf8');
+// Built with the official SDK (@sqds/sdk 2.0.4) for the devnet multisig.
+const vectors = JSON.parse(readFileSync(join(here, 'fixtures', 'squads-vectors.json'), 'utf8'));
+const { multisig, creator, vault } = vectors;
+
+const SYSTEM = '11111111111111111111111111111111';
+const COMPUTE_BUDGET = 'ComputeBudget111111111111111111111111111111';
+const METADATA = 'ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S';
+
+const hex = (bytes) => Buffer.from(bytes).toString('hex');
+const plain = (instruction) => ({
+    program: instruction.programAddress,
+    data: hex(instruction.data),
+    accounts: instruction.accounts.map((account) => ({
+        address: account.address,
+        signer: account.role === AccountRole.READONLY_SIGNER || account.role === AccountRole.WRITABLE_SIGNER,
+        writable: account.role === AccountRole.WRITABLE || account.role === AccountRole.WRITABLE_SIGNER,
+    })),
+});
+const fromVector = (vector) => ({
+    programAddress: vector.program,
+    data: Buffer.from(vector.data, 'hex'),
+    accounts: vector.accounts.map((account) => ({
+        address: account.address,
+        role: account.signer
+            ? account.writable
+                ? AccountRole.WRITABLE_SIGNER
+                : AccountRole.READONLY_SIGNER
+            : account.writable
+              ? AccountRole.WRITABLE
+              : AccountRole.READONLY,
+    })),
+});
+
+test('the vault is authority 1 of the multisig', async () => {
+    assert.equal(await findAuthorityPda(multisig, 1), vault);
+});
+
+test('transaction and instruction addresses match the SDK', async () => {
+    const transaction = await findTransactionPda(multisig, vectors.transactionIndex);
+    assert.equal(transaction, vectors.transactionPda);
+    assert.equal(await findInstructionPda(transaction, 1), vectors.instructionPda);
+});
+
+test('the Squads instructions match the SDK byte for byte', () => {
+    const { transactionPda, instructionPda } = vectors;
+    assert.deepEqual(plain(createTransactionInstruction({ multisig, transaction: transactionPda, creator, authorityIndex: 1 })), vectors.createTransaction);
+    assert.deepEqual(
+        plain(addInstructionInstruction({ multisig, transaction: transactionPda, instruction: instructionPda, creator, inner: fromVector(vectors.inner) })),
+        vectors.addInstruction,
+    );
+    assert.deepEqual(plain(activateTransactionInstruction({ multisig, transaction: transactionPda, creator })), vectors.activateTransaction);
+    assert.deepEqual(plain(approveTransactionInstruction({ multisig, transaction: transactionPda, member: creator })), vectors.approveTransaction);
+});
+
+test('an export is read into its instructions, without the compute budget ones', () => {
+    const groups = instructionsFromExport(exported, vault);
+    assert.deepEqual(groups.map((group) => group.length), [3, 1, 1, 4]);
+    const programs = groups.flat().map((instruction) => instruction.programAddress);
+    assert.ok(!programs.includes(COMPUTE_BUDGET));
+    assert.deepEqual(programs, [SYSTEM, METADATA, METADATA, METADATA, METADATA, METADATA, METADATA, METADATA, METADATA]);
+    // The first instruction is the vault paying the metadata account's rent.
+    assert.deepEqual(plain(groups[0][0]), vectors.inner);
+});
+
+test('an export whose fee payer is not the vault is rejected', () => {
+    assert.throws(() => instructionsFromExport(exported, creator), /fee payer/);
+});
+
+test('an empty export is rejected', () => {
+    assert.throws(() => instructionsFromExport('\n', vault), /no transactions/);
+});
+
+test('instructions are split so every proposal fits one transaction', async () => {
+    const groups = instructionsFromExport(exported, vault);
+    // As exported, the last transaction is too large for a single proposal.
+    assert.ok((await proposalSize(groups[3], { multisig, member: creator })) > PROPOSAL_SIZE_LIMIT);
+    const proposals = await splitForProposals(groups, { multisig, member: creator });
+    assert.deepEqual(proposals.map((proposal) => proposal.length), [3, 1, 1, 3, 1]);
+    // Order is preserved.
+    assert.deepEqual(proposals.flat(), groups.flat());
+    // Sizes of the transaction squads-deploy-ui builds on import, as measured with the SDK.
+    const sizes = await Promise.all(proposals.map((proposal) => proposalSize(proposal, { multisig, member: creator })));
+    assert.deepEqual(sizes, [984, 539, 539, 1015, 571]);
+});
+
+test('an importable message is a legacy message paid by the vault with the same instructions', async () => {
+    const groups = instructionsFromExport(exported, vault);
+    const [first] = await splitForProposals(groups, { multisig, member: creator });
+    const encoded = toImportableMessage(first, vault);
+    const message = getCompiledTransactionMessageDecoder().decode(getBase58Encoder().encode(encoded));
+    assert.equal(message.version, 'legacy');
+    assert.equal(message.staticAccounts[0], vault);
+    assert.equal(message.header.numSignerAccounts, 1);
+    assert.equal(message.instructions.length, first.length);
+    message.instructions.forEach((compiled, index) => {
+        assert.equal(message.staticAccounts[compiled.programAddressIndex], first[index].programAddress);
+        assert.deepEqual(
+            (compiled.accountIndices ?? []).map((accountIndex) => message.staticAccounts[accountIndex]),
+            first[index].accounts.map((account) => account.address),
+        );
+        assert.equal(hex(compiled.data ?? []), hex(first[index].data));
+    });
+});
+
+test('a multisig account is read for its next index and its members', () => {
+    const data = Buffer.alloc(8 + 2 + 2 + 4 + 4 + 1 + 32 + 1 + 4 + 64);
+    data.writeUInt16LE(2, 8); // threshold
+    data.writeUInt32LE(74, 12); // transaction index
+    data.writeUInt32LE(2, 54); // member count
+    Buffer.from(getBase58Encoder().encode(creator)).copy(data, 58);
+    Buffer.from(getBase58Encoder().encode(vault)).copy(data, 90);
+    assert.deepEqual(readMultisig(data), { threshold: 2, transactionIndex: 74, members: [creator, vault] });
+});
+
+test('a truncated multisig account is rejected', () => {
+    assert.throws(() => readMultisig(Buffer.alloc(40)), /multisig account/);
+});

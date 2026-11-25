@@ -114,16 +114,25 @@ deployed, so the IDL describes the program that is on chain.
   compares it with the chain. A run whose IDL already matches writes nothing.
 - On a `direct` cluster `DEPLOYER_KEYPAIR` writes the account. Only the
   upgrade authority can: the CLI refuses any other key.
-- On a `squads` or `squads-buffer` cluster `SQUADS_BOT_KEY` writes the IDL to
-  a buffer, sends the vault the rent for the metadata account, and hands the
-  buffer to the vault. The job summary lists base58 legacy transactions to
-  import into Squads, in order; the last one closes the buffer and returns
-  its rent to the bot key. The bot key needs about twice the rent shown in a
-  dry run.
+- On a `squads` cluster `SQUADS_BOT_KEY` writes the IDL to a buffer, sends
+  the vault the rent for the metadata account, hands the buffer to the vault
+  and creates the Squads v3 proposals (`upload-idl/squads-proposals.mjs`).
+  They show up on the Transactions page of the Squads UI; the members approve
+  and execute them in order. The bot key only creates and activates them. A
+  large IDL takes several proposals, because a vault can grow an account by
+  10KB per transaction; the last one closes the buffer and returns its rent
+  to the bot key, which needs about twice the rent shown in a dry run.
+- On a `squads-buffer` cluster the same happens without the proposals, as for
+  deploys: the job summary lists base58 messages for the UI's Import
+  Transaction dialog instead. The same messages are attached to every Squads
+  run, so an upload can be finished by hand if creating a proposal fails.
 
 The converter and the Program Metadata CLI are pinned by
-`upload-idl/package-lock.json`. Stay on Codama 1.x: that is what the Explorer
-parses. Run the converter's tests with `npm ci && npm test` in `upload-idl/`.
+`upload-idl/package-lock.json`. The Squads instructions are built on the
+same pinned Solana library and tested against vectors from the official SDK
+(`fixtures/squads-vectors.json`), which is not a dependency. Stay on Codama
+1.x: that is what the Explorer parses. Run the tests with
+`npm ci && npm test` in `upload-idl/`.
 
 ### Pinning and upgrades
 
