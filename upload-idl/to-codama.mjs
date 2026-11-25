@@ -1,9 +1,11 @@
 #!/usr/bin/env node
-// node cli.mjs --idl <path> --program-id <address> --out <path>
-// Prints `format=codama|anchor`; fails with a workflow error annotation.
+// node to-codama.mjs --idl <path> --out <path> [--program-id <address>]
+// Prints `format=codama|anchor` and `zlib_bytes=<n>` (the size the IDL takes
+// on chain); fails with a workflow error annotation.
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
+import { deflateSync } from 'node:zlib';
 
 import { convertIdl } from './convert.mjs';
 
@@ -15,12 +17,14 @@ try {
             'program-id': { type: 'string' },
         },
     });
-    if (!values.idl || !values.out) throw new Error('usage: cli.mjs --idl <path> --out <path> [--program-id <address>]');
+    if (!values.idl || !values.out) throw new Error('usage: to-codama.mjs --idl <path> --out <path> [--program-id <address>]');
     const idl = JSON.parse(readFileSync(values.idl, 'utf8'));
     const { format, content } = convertIdl(idl, { programId: values['program-id'] });
     // Compact: every byte of the IDL is paid for in rent.
-    writeFileSync(values.out, JSON.stringify(content));
+    const json = JSON.stringify(content);
+    writeFileSync(values.out, json);
     console.log(`format=${format}`);
+    console.log(`zlib_bytes=${deflateSync(json).length}`);
 } catch (error) {
     console.log(`::error::${String(error.message ?? error).replace(/\r?\n/g, ' ')}`);
     process.exit(1);

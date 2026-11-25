@@ -112,21 +112,22 @@ test('an IDL without a program address is rejected', () => {
 });
 
 test('the CLI writes the converted IDL and prints its format', () => {
-    const out = join(mkdtempSync(join(tmpdir(), 'idl-to-codama-')), 'idl.json');
+    const out = join(mkdtempSync(join(tmpdir(), 'upload-idl-')), 'idl.json');
     const stdout = execFileSync(
         process.execPath,
-        [join(here, 'cli.mjs'), '--idl', fixturePath('shank-minimal.json'), '--program-id', 'mnoopTCrg4p8ry25e4bcWA9XZjbNjMTfgYVGGEdRsf3', '--out', out],
+        [join(here, 'to-codama.mjs'), '--idl', fixturePath('shank-minimal.json'), '--program-id', 'mnoopTCrg4p8ry25e4bcWA9XZjbNjMTfgYVGGEdRsf3', '--out', out],
         { encoding: 'utf8' },
     );
     assert.match(stdout, /^format=codama$/m);
+    assert.match(stdout, /^zlib_bytes=\d+$/m);
     assert.equal(JSON.parse(readFileSync(out, 'utf8')).kind, 'rootNode');
 });
 
 test('the CLI fails with a workflow error annotation on a mismatch', () => {
-    const out = join(mkdtempSync(join(tmpdir(), 'idl-to-codama-')), 'idl.json');
+    const out = join(mkdtempSync(join(tmpdir(), 'upload-idl-')), 'idl.json');
     const result = spawnSync(
         process.execPath,
-        [join(here, 'cli.mjs'), '--idl', fixturePath('shank-minimal.json'), '--program-id', 'CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d', '--out', out],
+        [join(here, 'to-codama.mjs'), '--idl', fixturePath('shank-minimal.json'), '--program-id', 'CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d', '--out', out],
         { encoding: 'utf8' },
     );
     assert.equal(result.status, 1);
