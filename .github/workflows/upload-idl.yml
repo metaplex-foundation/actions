@@ -1,0 +1,429 @@
+name: Upload IDL
+
+# Reusable workflow. Publishes a program's IDL to the canonical `idl` account
+# of the Program Metadata program, which is where the Solana Explorer looks
+# for it. The IDL is the file in `idls/` whose address is the program's
+# `deploy.program_id`, read from `git_ref`.
+#
+# A Shank IDL is converted to a Codama root node first: the Explorer decodes
+# anything else with Anchor discriminators, which a Shank program does not
+# use. Anchor IDLs are uploaded as they are.
+#
+# Only the program's upgrade authority can write the canonical account, so
+# the upload follows the cluster's deploy type in `.github/programs.json`:
+#
+#   direct                  written by DEPLOYER_KEYPAIR.
+#   squads, squads-buffer   SQUADS_BOT_KEY writes the IDL to a buffer, sends
+#                           the vault the rent for the metadata account and
+#                           hands the buffer over. The job summary lists the
+#                           transactions to import into Squads.
+#
+# Program Metadata is deployed on devnet and mainnet-beta only.
+#
+# Secrets:
+#   RPC_URL           RPC endpoint for the cluster (required)
+#   DEPLOYER_KEYPAIR  upgrade-authority keypair for `direct` clusters
+#   SQUADS_BOT_KEY    submitter keypair for `squads` clusters
+
+on:
+  workflow_call:
+    inputs:
+      program:
+        description: Program name as listed in .github/programs.json
+        type: string
+        required: true
+      cluster:
+        description: Cluster key under deploy.clusters in programs.json (devnet or mainnet-beta)
+        type: string
+        required: true
+      git_ref:
+        description: Release tag, commit or branch whose IDL is uploaded
+        type: string
+        required: true
+      dry_run:
+        description: Convert and compare with the on-chain IDL without writing anything
+        type: boolean
+        required: false
+        default: true
+      runner:
+        description: Runner label
+        type: string
+        required: false
+        default: ubuntu-latest
+      cache:
+        description: Use dependency caches
+        type: boolean
+        required: false
+        default: true
+    secrets:
+      RPC_URL:
+        required: true
+      DEPLOYER_KEYPAIR:
+        required: false
+      SQUADS_BOT_KEY:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  upload:
+    name: Upload
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+    env:
+      PM: ${{ github.workspace }}/.mpl-actions/upload-idl/node_modules/.bin/program-metadata
+      NO_COLOR: "1"
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.git_ref }}
+          persist-credentials: false
+
+      - name: Checkout shared actions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit of this reusable workflow file, so the composite actions
+          # and the tools below resolve from the pinned commit the caller chose.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .mpl-actions
+          persist-credentials: false
+
+      - name: Checkout program descriptors
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Deploy targets and host tool pins come from the revision this
+          # workflow was dispatched from, not from git_ref: a release tag cut
+          # before programs.json existed must still work. Only the IDL comes
+          # from git_ref.
+          ref: ${{ github.sha }}
+          sparse-checkout: |
+            .github/programs.json
+            .github/.env
+          sparse-checkout-cone-mode: false
+          path: .mpl-caller
+          persist-credentials: false
+
+      - name: Load host tool pins
+        uses: ./.mpl-actions/load-env
+        with:
+          file: .mpl-caller/.github/.env
+          keys: SOLANA_VERSION DEPLOY_SOLANA_VERSION
+
+      - name: Program info
+        id: program
+        uses: ./.mpl-actions/program-info
+        with:
+          name: ${{ inputs.program }}
+          file: .mpl-caller/.github/programs.json
+
+      - name: Resolve upload
+        id: plan
+        shell: bash
+        env:
+          DEPLOY_JSON: ${{ steps.program.outputs.deploy }}
+          CLUSTER: ${{ inputs.cluster }}
+          PROGRAM: ${{ inputs.program }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          case "$CLUSTER" in
+            devnet|mainnet-beta) ;;
+            *) echo "::error::The Program Metadata program is only deployed on devnet and mainnet-beta, not '$CLUSTER'"; exit 1 ;;
+          esac
+          PROGRAM_ID="$(jq -r '.program_id // ""' <<< "$DEPLOY_JSON")"
+          [ -n "$PROGRAM_ID" ] || { echo "::error::program '$PROGRAM' has no deploy.program_id in .github/programs.json"; exit 1; }
+          CFG="$(jq -c --arg c "$CLUSTER" '.clusters[$c] // empty' <<< "$DEPLOY_JSON")"
+          [ -n "$CFG" ] || { echo "::error::cluster '$CLUSTER' is not configured under deploy.clusters in .github/programs.json"; exit 1; }
+          TYPE="$(jq -r '.type' <<< "$CFG")"
+          VAULT="$(jq -r '.vault // ""' <<< "$CFG")"
+          case "$TYPE" in
+            direct) ;;
+            squads|squads-buffer)
+              [ -n "$VAULT" ] || { echo "::error::cluster '$CLUSTER' has deploy type '$TYPE' but no vault"; exit 1; }
+              ;;
+            *) echo "::error::cluster '$CLUSTER' has unknown deploy type '$TYPE'"; exit 1 ;;
+          esac
+          # Only a Squads write installs the Solana CLI (to fund the vault), so
+          # a repository without the pins can still dry-run and upload directly.
+          DEPLOY_SOLANA="${DEPLOY_SOLANA_VERSION:-${SOLANA_VERSION:-}}"
+          if [ "$TYPE" != "direct" ] && [ "$DRY_RUN" != "true" ] && [ -z "$DEPLOY_SOLANA" ]; then
+            echo "::error::Set SOLANA_VERSION or DEPLOY_SOLANA_VERSION in .github/.env: the Squads upload needs the Solana CLI"
+            exit 1
+          fi
+          {
+            echo "program_id=$PROGRAM_ID"
+            echo "type=$TYPE"
+            echo "vault=$VAULT"
+            echo "deploy_solana=$DEPLOY_SOLANA"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Locate the IDL
+        id: idl
+        shell: bash
+        env:
+          PROGRAM_ID: ${{ steps.plan.outputs.program_id }}
+          GIT_REF: ${{ inputs.git_ref }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          MATCHES=()
+          for file in idls/*.json; do
+            ADDRESS="$(jq -r '(.metadata.address? // .address? // "") | strings' "$file" 2>/dev/null || true)"
+            if [ "$ADDRESS" = "$PROGRAM_ID" ]; then
+              MATCHES+=("$file")
+            fi
+          done
+          if [ "${#MATCHES[@]}" -eq 0 ]; then
+            echo "::error::No file in idls/ at '$GIT_REF' has the address $PROGRAM_ID (metadata.address or address)"
+            exit 1
+          fi
+          if [ "${#MATCHES[@]}" -gt 1 ]; then
+            echo "::error::Several IDLs at '$GIT_REF' have the address $PROGRAM_ID: ${MATCHES[*]}"
+            exit 1
+          fi
+          echo "source=${MATCHES[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          # A host tool pin: the converter and the uploader do not run the
+          # repository's own JavaScript.
+          node-version: 24.x
+
+      - name: Install the IDL tools
+        shell: bash
+        working-directory: .mpl-actions/upload-idl
+        # The lockfile pins the converter, the Program Metadata CLI and every
+        # transitive dependency; nothing here needs an install script.
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Convert the IDL
+        id: convert
+        shell: bash
+        env:
+          SOURCE: ${{ steps.idl.outputs.source }}
+          PROGRAM_ID: ${{ steps.plan.outputs.program_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/upload-idl"
+          FILE="$RUNNER_TEMP/upload-idl/$(basename "$SOURCE")"
+          node .mpl-actions/upload-idl/to-codama.mjs --idl "$SOURCE" --program-id "$PROGRAM_ID" --out "$FILE" | tee "$RUNNER_TEMP/upload-idl/convert.log"
+          grep -E '^(format|zlib_bytes)=' "$RUNNER_TEMP/upload-idl/convert.log" >> "$GITHUB_OUTPUT"
+          echo "file=$FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the converted IDL
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: idl-${{ inputs.program }}-${{ inputs.cluster }}
+          path: ${{ steps.convert.outputs.file }}
+          if-no-files-found: error
+
+      - name: Compare with the on-chain IDL
+        id: compare
+        shell: bash
+        env:
+          RPC_URL: ${{ secrets.RPC_URL }}
+          PROGRAM_ID: ${{ steps.plan.outputs.program_id }}
+          FILE: ${{ steps.convert.outputs.file }}
+          ZLIB_BYTES: ${{ steps.convert.outputs.zlib_bytes }}
+        run: |
+          set -euo pipefail
+          [ -n "$RPC_URL" ] || { echo "::error::RPC_URL secret is empty"; exit 1; }
+          DIR="$RUNNER_TEMP/upload-idl"
+          STATUS=0
+          "$PM" fetch idl "$PROGRAM_ID" --rpc "$RPC_URL" --output "$DIR/on-chain.json" > "$DIR/fetch.log" 2>&1 || STATUS=$?
+          if [ "$STATUS" -eq 0 ]; then
+            EXISTS=true
+            # Compare the parsed documents: key order and whitespace are not a change.
+            if jq -cS . "$DIR/on-chain.json" > "$DIR/on-chain.sorted.json" 2>/dev/null &&
+              jq -cS . "$FILE" > "$DIR/new.sorted.json" &&
+              cmp -s "$DIR/on-chain.sorted.json" "$DIR/new.sorted.json"; then
+              CHANGED=false
+            else
+              CHANGED=true
+            fi
+          elif grep -q 'Account not found' "$DIR/fetch.log"; then
+            EXISTS=false
+            CHANGED=true
+          else
+            cat "$DIR/fetch.log"
+            echo "::error::Could not read the on-chain IDL of $PROGRAM_ID"
+            exit 1
+          fi
+          # 96 bytes of account header precede the compressed IDL.
+          RENT="$(curl -sS --fail -X POST "$RPC_URL" -H 'content-type: application/json' \
+            -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getMinimumBalanceForRentExemption\",\"params\":[$((96 + ZLIB_BYTES))]}" |
+            jq -er '.result')"
+          {
+            echo "exists=$EXISTS"
+            echo "changed=$CHANGED"
+            echo "rent=$RENT"
+            echo "rent_sol=$(awk -v lamports="$RENT" 'BEGIN { printf "%.4f", lamports / 1000000000 }')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install Solana
+        # Only the Squads path needs the CLI, to fund the vault.
+        if: ${{ !inputs.dry_run && steps.compare.outputs.changed == 'true' && steps.plan.outputs.type != 'direct' }}
+        uses: ./.mpl-actions/install-solana
+        with:
+          version: ${{ steps.plan.outputs.deploy_solana }}
+          cache: ${{ inputs.cache }}
+
+      - name: Write signer file
+        if: ${{ !inputs.dry_run && steps.compare.outputs.changed == 'true' }}
+        shell: bash
+        env:
+          DEPLOYER_KEYPAIR: ${{ secrets.DEPLOYER_KEYPAIR }}
+          SQUADS_BOT_KEY: ${{ secrets.SQUADS_BOT_KEY }}
+          TYPE: ${{ steps.plan.outputs.type }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/upload-idl-keys"
+          if [ "$TYPE" = "direct" ]; then
+            [ -n "$DEPLOYER_KEYPAIR" ] || { echo "::error::DEPLOYER_KEYPAIR secret is required to write the IDL of a direct deploy"; exit 1; }
+            printf '%s' "$DEPLOYER_KEYPAIR" > "$RUNNER_TEMP/upload-idl-keys/signer.json"
+          else
+            [ -n "$SQUADS_BOT_KEY" ] || { echo "::error::SQUADS_BOT_KEY secret is required to prepare the IDL of a squads deploy"; exit 1; }
+            printf '%s' "$SQUADS_BOT_KEY" > "$RUNNER_TEMP/upload-idl-keys/signer.json"
+          fi
+
+      - name: Write the IDL (direct)
+        if: ${{ !inputs.dry_run && steps.compare.outputs.changed == 'true' && steps.plan.outputs.type == 'direct' }}
+        shell: bash
+        env:
+          RPC_URL: ${{ secrets.RPC_URL }}
+          PROGRAM_ID: ${{ steps.plan.outputs.program_id }}
+          FILE: ${{ steps.convert.outputs.file }}
+        run: |
+          set -euo pipefail
+          DIR="$RUNNER_TEMP/upload-idl"
+          # The CLI refuses a keypair that is not the program's upgrade
+          # authority, so this cannot end up in a non-canonical account.
+          "$PM" write idl "$PROGRAM_ID" "$FILE" --format json \
+            --keypair "$RUNNER_TEMP/upload-idl-keys/signer.json" --rpc "$RPC_URL"
+          "$PM" fetch idl "$PROGRAM_ID" --rpc "$RPC_URL" --output "$DIR/written.json"
+          if ! cmp -s <(jq -cS . "$DIR/written.json") <(jq -cS . "$FILE"); then
+            echo "::error::The on-chain IDL of $PROGRAM_ID differs from the uploaded file"
+            exit 1
+          fi
+
+      - name: Prepare the IDL for the vault (squads)
+        if: ${{ !inputs.dry_run && steps.compare.outputs.changed == 'true' && steps.plan.outputs.type != 'direct' }}
+        shell: bash
+        env:
+          RPC_URL: ${{ secrets.RPC_URL }}
+          PROGRAM_ID: ${{ steps.plan.outputs.program_id }}
+          IDL_FILE: ${{ steps.convert.outputs.file }}
+          VAULT: ${{ steps.plan.outputs.vault }}
+          ZLIB_BYTES: ${{ steps.convert.outputs.zlib_bytes }}
+        run: |
+          set -euo pipefail
+          BOT_KEYPAIR="$RUNNER_TEMP/upload-idl-keys/signer.json" OUT_DIR="$RUNNER_TEMP/upload-idl/squads" \
+            .mpl-actions/upload-idl/squads-export.sh
+
+      - name: Upload the Squads transactions
+        if: ${{ !inputs.dry_run && steps.compare.outputs.changed == 'true' && steps.plan.outputs.type != 'direct' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: squads-transactions-${{ inputs.program }}-${{ inputs.cluster }}
+          path: |
+            ${{ runner.temp }}/upload-idl/squads/transactions.txt
+            ${{ runner.temp }}/upload-idl/squads/instructions.txt
+          if-no-files-found: error
+
+      - name: Summary
+        if: always()
+        shell: bash
+        env:
+          PROGRAM: ${{ inputs.program }}
+          CLUSTER: ${{ inputs.cluster }}
+          GIT_REF: ${{ inputs.git_ref }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          JOB_STATUS: ${{ job.status }}
+          PROGRAM_ID: ${{ steps.plan.outputs.program_id }}
+          TYPE: ${{ steps.plan.outputs.type }}
+          VAULT: ${{ steps.plan.outputs.vault }}
+          SOURCE: ${{ steps.idl.outputs.source }}
+          FORMAT: ${{ steps.convert.outputs.format }}
+          ZLIB_BYTES: ${{ steps.convert.outputs.zlib_bytes }}
+          EXISTS: ${{ steps.compare.outputs.exists }}
+          CHANGED: ${{ steps.compare.outputs.changed }}
+          RENT_SOL: ${{ steps.compare.outputs.rent_sol }}
+        run: |
+          set -euo pipefail
+          SQUADS_DIR="$RUNNER_TEMP/upload-idl/squads"
+          if [ "$CLUSTER" = "mainnet-beta" ]; then QUERY=""; else QUERY="?cluster=$CLUSTER"; fi
+          {
+            echo "## IDL of \`$PROGRAM\` on $CLUSTER"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Program | [\`$PROGRAM_ID\`](https://explorer.solana.com/address/$PROGRAM_ID$QUERY) |"
+            echo "| Source | \`${SOURCE:-not found}\` at \`$GIT_REF\` |"
+            echo "| Uploaded as | ${FORMAT:-unknown}${ZLIB_BYTES:+, $ZLIB_BYTES bytes compressed} |"
+            echo "| Rent | ${RENT_SOL:+about $RENT_SOL SOL} |"
+            echo "| On chain before this run | $([ "${EXISTS:-}" = "true" ] && echo "an IDL" || echo "no IDL")$([ "${CHANGED:-}" = "false" ] && echo ", identical") |"
+            echo
+            # result.env exists once the buffer is with the vault. From then on
+            # the transactions are the only way to use it, so they are listed
+            # even if a later step failed.
+            SHOW_SQUADS=false
+            if [ "$JOB_STATUS" != "success" ]; then
+              if [ -f "$SQUADS_DIR/result.env" ] && [ -s "$SQUADS_DIR/transactions.txt" ]; then
+                echo "**The job did not finish ($JOB_STATUS), but the buffer was prepared and handed to the vault first.** The transactions below are valid: use them instead of running the workflow again."
+                echo
+                SHOW_SQUADS=true
+              else
+                echo "**The job did not finish ($JOB_STATUS).**"
+              fi
+            elif [ "${CHANGED:-}" = "false" ]; then
+              echo "The on-chain IDL already matches. Nothing was written."
+            elif [ "$DRY_RUN" = "true" ]; then
+              echo "Dry run: the IDL differs from the chain and nothing was written. The converted IDL is attached to this run."
+            elif [ "$TYPE" = "direct" ]; then
+              echo "The IDL was written and read back. The Explorer caches IDLs for up to 30 minutes."
+            else
+              SHOW_SQUADS=true
+            fi
+            if [ "$SHOW_SQUADS" = "true" ]; then
+              # shellcheck disable=SC1091
+              . "$SQUADS_DIR/result.env"
+              echo "### Squads transactions"
+              echo
+              echo "The IDL is in buffer \`$buffer\`, now owned by vault \`$VAULT\`."
+              echo "The vault received $(awk -v lamports="$funding" 'BEGIN { printf "%.9f", lamports / 1000000000 }') SOL from \`$submitter\` for the rent of metadata account \`$metadata\`."
+              echo
+              echo "Import the $transactions transaction(s) below into Squads **in this order** and execute each before the next."
+              echo "They are base58 legacy transactions whose signer is the vault. The last one closes the buffer and returns its rent to \`$submitter\`."
+              echo "A large IDL grows the account 10KB at a time, so some transactions are identical: import every one of them."
+              echo "They were built against the current on-chain state: run this workflow again if the IDL account changes before they execute."
+              echo
+              N=0
+              while IFS= read -r TRANSACTION; do
+                N=$((N + 1))
+                echo "**Transaction $N**"
+                echo
+                echo '```'
+                echo "$TRANSACTION"
+                echo '```'
+                echo
+              done < "$SQUADS_DIR/transactions.txt"
+              echo "<details><summary>Instructions</summary>"
+              echo
+              echo '```'
+              cat "$SQUADS_DIR/instructions.txt"
+              echo '```'
+              echo
+              echo "</details>"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up signer file
+        if: always()
+        shell: bash
+        run: rm -rf "$RUNNER_TEMP/upload-idl-keys"

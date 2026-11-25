@@ -1,0 +1,16 @@
+{
+  "version": "0.2.1",
+  "name": "mpl_noop",
+  "instructions": [
+    {
+      "name": "NoopInstruction",
+      "accounts": [],
+      "args": [],
+      "discriminant": { "type": "u8", "value": 0 }
+    }
+  ],
+  "metadata": {
+    "address": "mnoopTCrg4p8ry25e4bcWA9XZjbNjMTfgYVGGEdRsf3",
+    "origin": "shank"
+  }
+}

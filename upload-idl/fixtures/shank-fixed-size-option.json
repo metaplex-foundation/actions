@@ -1,0 +1,65 @@
+{
+  "version": "0.1.0",
+  "name": "sentinel_program",
+  "instructions": [
+    {
+      "name": "SetDelegate",
+      "accounts": [
+        { "name": "record", "isMut": true, "isSigner": false, "docs": ["The record"] },
+        { "name": "authority", "isMut": false, "isSigner": true }
+      ],
+      "args": [
+        {
+          "name": "delegate",
+          "type": {
+            "fixedSizeOption": {
+              "inner": "publicKey",
+              "sentinel": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+            }
+          }
+        }
+      ],
+      "discriminant": { "type": "u8", "value": 3 }
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Record",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "owner", "type": "publicKey" },
+          {
+            "name": "delegate",
+            "type": {
+              "fixedSizeOption": {
+                "inner": "publicKey",
+                "sentinel": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+              }
+            }
+          },
+          {
+            "name": "expiry",
+            "type": {
+              "fixedSizeOption": { "inner": "u64", "sentinel": [255,255,255,255,255,255,255,255] }
+            }
+          },
+          {
+            "name": "history",
+            "type": {
+              "vec": {
+                "fixedSizeOption": { "inner": "u16", "sentinel": [0, 0] }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "metadata": {
+    "origin": "shank",
+    "address": "1DREGFgysWYxLnRnKQnwrxnJQeSMk2HmGaC6whw2B2p",
+    "binaryVersion": "0.4.2",
+    "libVersion": "0.4.2"
+  }
+}

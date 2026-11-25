@@ -9,3 +9,16 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+  - package-ecosystem: npm
+    directory: /upload-idl
+    schedule:
+      interval: weekly
+    groups:
+      upload-idl:
+        patterns: ["*"]
+    ignore:
+      # The Solana Explorer parses Codama 1.x root nodes.
+      - dependency-name: codama
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@codama/*"
+        update-types: ["version-update:semver-major"]
