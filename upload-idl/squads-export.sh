@@ -74,11 +74,18 @@ sol() {
 # Rent the vault's transactions move into the metadata account for an IDL
 # that takes $1 bytes of account space: all of it for a new account, the
 # difference for one that grows, nothing for one that shrinks.
+#
+# Callers run this in a command substitution, where bash drops `set -e`, so
+# each query is checked here: a failed one must stop the run rather than
+# turn into "no funding needed".
 metadata_funding() {
-  local funding
-  funding="$(rent "$1")"
+  local funding existing
+  funding="$(rent "$1")" || return 1
+  [[ "$funding" =~ ^[0-9]+$ ]] || return 1
   if [ "$METADATA_SPACE" != "missing" ]; then
-    funding=$((funding - $(rent "$METADATA_SPACE")))
+    existing="$(rent "$METADATA_SPACE")" || return 1
+    [[ "$existing" =~ ^[0-9]+$ ]] || return 1
+    funding=$((funding - existing))
     [ "$funding" -gt 0 ] || funding=0
   fi
   echo "$funding"
@@ -112,7 +119,8 @@ if [ -n "${ZLIB_BYTES:-}" ]; then
   ESTIMATE="$(rent $((ACCOUNT_HEADER + ZLIB_BYTES)))"
   # Rent for the buffer (returned when the vault closes it) plus the rent
   # sent to the vault for the metadata account.
-  REQUIRED=$((ESTIMATE + $(metadata_funding $((ACCOUNT_HEADER + ZLIB_BYTES))) + FEE_MARGIN))
+  ESTIMATED_FUNDING="$(metadata_funding $((ACCOUNT_HEADER + ZLIB_BYTES)))" || fail "Could not read the rent for the metadata account"
+  REQUIRED=$((ESTIMATE + ESTIMATED_FUNDING + FEE_MARGIN))
   AVAILABLE="$(balance "$BOT")"
   if [ "$AVAILABLE" -lt "$REQUIRED" ]; then
     fail "Submitter $BOT holds $(sol "$AVAILABLE") SOL, the upload needs about $(sol "$REQUIRED") SOL ($(sol "$ESTIMATE") of it comes back when the vault closes the buffer)"
@@ -155,8 +163,16 @@ awk '/^\[Transaction #[0-9]+\]$/ { if ((getline tx) > 0) print tx }' "$OUT_DIR/e
 COUNT="$(wc -l < "$OUT_DIR/transactions.txt" | tr -d ' ')"
 [ "$COUNT" -gt 0 ] || fail "The export produced no transactions"
 
+# The export sized its rent transfer from the metadata account as it was then.
+# If the account changed since this script first read it, the amount computed
+# below would not match that transfer: stop before the vault gets anything.
+# (A change after this point still needs a new run; the summary says so.)
+CURRENT_SPACE="$(account_space "$METADATA")"
+[ "$CURRENT_SPACE" = "$METADATA_SPACE" ] ||
+  fail "Metadata account $METADATA changed while the upload was prepared (size $METADATA_SPACE, now $CURRENT_SPACE). Run the workflow again."
+
 # The first transaction moves this rent from the vault to the metadata account.
-FUNDING="$(metadata_funding "$BUFFER_SPACE")"
+FUNDING="$(metadata_funding "$BUFFER_SPACE")" || fail "Could not read the rent for the metadata account"
 
 if [ "$FUNDING" -gt 0 ]; then
   echo "Sending $(sol "$FUNDING") SOL to the vault for the metadata account's rent" >&2
