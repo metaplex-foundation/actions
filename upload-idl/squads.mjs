@@ -154,6 +154,30 @@ export async function proposalInstructions(instructions, { multisig, creator, tr
     return { transaction, instructions: out };
 }
 
+/**
+ * Creates the proposals one after the other, numbered from `firstIndex`.
+ * `send` submits and confirms one proposal's instructions; `onCreated` is
+ * called as soon as a proposal exists, before the next one is attempted, so
+ * that a failure partway leaves a record of what was created.
+ */
+export async function createProposals(proposals, { multisig, creator, firstIndex, send, onCreated }) {
+    const created = [];
+    for (const [offset, instructions] of proposals.entries()) {
+        const index = firstIndex + offset;
+        const proposal = await proposalInstructions(instructions, { multisig, creator, transactionIndex: index });
+        try {
+            await send(proposal.instructions);
+        } catch (error) {
+            const done = created.length > 0 ? ` Proposals ${created.map((p) => p.index).join(', ')} were created before the failure.` : '';
+            throw new Error(`could not create proposal ${index} (${offset + 1} of ${proposals.length}): ${error.message}.${done}`);
+        }
+        const record = { index, transaction: proposal.transaction };
+        created.push(record);
+        onCreated?.(record);
+    }
+    return created;
+}
+
 function compile(instructions, feePayer, version) {
     return compileTransactionMessage(
         pipe(
