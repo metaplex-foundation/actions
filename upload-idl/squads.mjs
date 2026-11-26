@@ -169,8 +169,9 @@ export class UnconfirmedError extends Error {
  * is followed either way; only `isDefinitiveSendError` stops at once.
  *
  * Rejects with the on-chain or send error when the transaction did not land,
- * and with UnconfirmedError when the cluster stops answering before that is
- * known.
+ * and with UnconfirmedError when that cannot be known: the cluster stops
+ * answering, or the transaction is seen but stays unconfirmed past its
+ * blockhash. Every path ends.
  */
 export async function confirmSubmission({
     signature,
@@ -181,6 +182,7 @@ export async function confirmSubmission({
     sleep,
     isDefinitiveSendError = () => false,
     maxFailures = 30,
+    maxPollsAfterExpiry = 30,
 }) {
     let sendError = null;
     try {
@@ -189,14 +191,18 @@ export async function confirmSubmission({
         if (isDefinitiveSendError(error)) throw error;
         sendError = error;
     }
+    const isConfirmed = (status) => status?.confirmationStatus === 'confirmed' || status?.confirmationStatus === 'finalized';
     let failures = 0;
     let expired = false;
+    let pollsAfterExpiry = 0;
     for (;;) {
         let status;
         let height;
         try {
             status = await getStatus();
-            if (!status && !expired) height = await getBlockHeight();
+            // Read on every poll that settles nothing, whatever the status:
+            // a transaction that stays "processed" must not hide the expiry.
+            if (!expired && !status?.err && !isConfirmed(status)) height = await getBlockHeight();
         } catch (error) {
             failures += 1;
             if (failures >= maxFailures) {
@@ -210,10 +216,17 @@ export async function confirmSubmission({
             const detail = JSON.stringify(status.err, (_, value) => (typeof value === 'bigint' ? value.toString() : value));
             throw new Error(`transaction ${signature} failed: ${detail}`);
         }
-        if (status?.confirmationStatus === 'confirmed' || status?.confirmationStatus === 'finalized') return signature;
-        // No status after the blockhash expired, read once more after expiry: it cannot land any more.
-        if (expired && !status) throw sendError ?? new Error(`transaction ${signature} expired before it was confirmed`);
-        if (height !== undefined && height > lastValidBlockHeight) {
+        if (isConfirmed(status)) return signature;
+        if (expired) {
+            // No status, read once more after the expiry: it cannot land any more.
+            if (!status) throw sendError ?? new Error(`transaction ${signature} expired before it was confirmed`);
+            // Seen but not confirmed. It should settle within a few slots;
+            // if it does not, stop waiting and say the outcome is unknown.
+            pollsAfterExpiry += 1;
+            if (pollsAfterExpiry >= maxPollsAfterExpiry) {
+                throw new UnconfirmedError(`transaction ${signature} was processed but not confirmed after its blockhash expired`);
+            }
+        } else if (height !== undefined && height > lastValidBlockHeight) {
             expired = true;
             continue;
         }
