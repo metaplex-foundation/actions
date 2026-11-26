@@ -10,9 +10,15 @@
     ]
   },
   "runners": {
-    "test_js": "32-core",
+    "test_js": "ubicloud-standard-8",
     "deploy": "ubuntu-latest-16-cores",
     "verify": "ubuntu-latest-16-cores"
+  },
+  "main_runners": {
+    "build_programs": "ubicloud-standard-2",
+    "test_programs": "ubicloud-standard-4",
+    "coverage": "ubicloud-standard-4",
+    "generate_clients": "ubicloud-standard-2"
   },
   "coverage": {
     "pre_command": "python3 -m unittest configs/scripts/program/test_coverage_gate.py"
