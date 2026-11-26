@@ -10,6 +10,7 @@ import {
     activateTransactionInstruction,
     addInstructionInstruction,
     approveTransactionInstruction,
+    createProposals,
     createTransactionInstruction,
     findAuthorityPda,
     findInstructionPda,
@@ -140,4 +141,40 @@ test('a multisig account is read for its next index and its members', () => {
 
 test('a truncated multisig account is rejected', () => {
     assert.throws(() => readMultisig(Buffer.alloc(40)), /multisig account/);
+});
+
+test('each proposal is recorded as soon as it exists, so a later failure does not lose it', async () => {
+    const proposals = await splitForProposals(instructionsFromExport(exported, vault), { multisig, member: creator });
+    const recorded = [];
+    const sent = [];
+    let calls = 0;
+    await assert.rejects(
+        createProposals(proposals, {
+            multisig,
+            creator,
+            firstIndex: 75,
+            send: async (instructions) => {
+                calls += 1;
+                // The third proposal cannot be sent.
+                if (calls === 3) throw new Error('blockhash expired');
+                sent.push(instructions);
+            },
+            onCreated: (proposal) => recorded.push(proposal),
+        }),
+        /could not create proposal 77 \(3 of 5\): blockhash expired\. Proposals 75, 76 were created before the failure\./,
+    );
+    assert.deepEqual(recorded, [
+        { index: 75, transaction: vectors.transactionPda },
+        { index: 76, transaction: await findTransactionPda(multisig, 76) },
+    ]);
+    // Create, three stored instructions, activate.
+    assert.equal(sent[0].length, 5);
+});
+
+test('every proposal is recorded in order when all are created', async () => {
+    const proposals = await splitForProposals(instructionsFromExport(exported, vault), { multisig, member: creator });
+    const recorded = [];
+    const created = await createProposals(proposals, { multisig, creator, firstIndex: 75, send: async () => {}, onCreated: (proposal) => recorded.push(proposal) });
+    assert.deepEqual(created.map((proposal) => proposal.index), [75, 76, 77, 78, 79]);
+    assert.deepEqual(recorded, created);
 });

@@ -14,12 +14,13 @@
 // proposal, for the "Import Transaction" dialog of squads-deploy-ui.
 // With --propose it also creates and activates the proposals as the keypair
 // (a member of the multisig) and writes <out-dir>/proposals.txt, one
-// "<transaction index> <transaction account>" line per proposal. The keypair
-// never approves: the members still approve and execute.
+// "<transaction index> <transaction account>" line per proposal, appended as
+// each one is created: after a failure the file lists the proposals that
+// exist. The keypair never approves: the members still approve and execute.
 //
 // Fails with a workflow error annotation.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 
@@ -40,10 +41,10 @@ import {
 
 import {
     COMPUTE_BUDGET_PROGRAM,
+    createProposals,
     findAuthorityPda,
     instructionsFromExport,
     PROPOSAL_SIZE_LIMIT,
-    proposalInstructions,
     readMultisig,
     splitForProposals,
     SQUADS_PROGRAM,
@@ -134,24 +135,24 @@ async function loadProposer({ multisig, keypair, rpcUrl }) {
     return { rpc, signer, transactionIndex };
 }
 
-async function propose(proposals, { multisig, keypair, rpcUrl }) {
+async function propose(proposals, { multisig, keypair, rpcUrl, record }) {
     const { rpc, signer, transactionIndex } = await loadProposer({ multisig, keypair, rpcUrl });
-    const created = [];
-    for (const [offset, instructions] of proposals.entries()) {
-        const index = transactionIndex + 1 + offset;
-        const proposal = await proposalInstructions(instructions, { multisig, creator: signer.address, transactionIndex: index });
-        try {
-            for (const batch of packTransactions(proposal.instructions, signer.address)) {
+    // The file exists from here on, and is empty until a proposal does.
+    writeFileSync(record, '');
+    return createProposals(proposals, {
+        multisig,
+        creator: signer.address,
+        firstIndex: transactionIndex + 1,
+        send: async (instructions) => {
+            for (const batch of packTransactions(instructions, signer.address)) {
                 await sendAndConfirm(rpc, signer, batch);
             }
-        } catch (error) {
-            const done = created.length > 0 ? ` Proposals ${created.map((p) => p.index).join(', ')} were created before the failure.` : '';
-            throw new Error(`could not create proposal ${index} (${offset + 1} of ${proposals.length}): ${error.message}.${done}`);
-        }
-        created.push({ index, transaction: proposal.transaction });
-        console.error(`Created proposal ${index} (${proposal.transaction}) with ${instructions.length} instruction(s)`);
-    }
-    return created;
+        },
+        onCreated: ({ index, transaction }) => {
+            appendFileSync(record, `${index} ${transaction}\n`);
+            console.error(`Created proposal ${index} (${transaction})`);
+        },
+    });
 }
 
 try {
@@ -190,8 +191,7 @@ try {
 
     if (values.propose) {
         if (!values.keypair || !values.rpc) throw new Error('--propose needs --keypair and --rpc');
-        const created = await propose(proposals, { multisig, keypair: values.keypair, rpcUrl: values.rpc });
-        writeFileSync(join(values['out-dir'], 'proposals.txt'), created.map((p) => `${p.index} ${p.transaction}`).join('\n') + '\n');
+        await propose(proposals, { multisig, keypair: values.keypair, rpcUrl: values.rpc, record: join(values['out-dir'], 'proposals.txt') });
     }
 } catch (error) {
     console.log(`::error::${String(error.message ?? error).replace(/\r?\n/g, ' ')}`);
