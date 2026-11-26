@@ -10,6 +10,7 @@ import {
     activateTransactionInstruction,
     addInstructionInstruction,
     approveTransactionInstruction,
+    confirmSubmission,
     createProposals,
     createTransactionInstruction,
     findAuthorityPda,
@@ -21,6 +22,7 @@ import {
     readMultisig,
     splitForProposals,
     toImportableMessage,
+    UnconfirmedError,
 } from './squads.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -177,4 +179,141 @@ test('every proposal is recorded in order when all are created', async () => {
     const created = await createProposals(proposals, { multisig, creator, firstIndex: 75, send: async () => {}, onCreated: (proposal) => recorded.push(proposal) });
     assert.deepEqual(created.map((proposal) => proposal.index), [75, 76, 77, 78, 79]);
     assert.deepEqual(recorded, created);
+});
+
+const confirmed = { confirmationStatus: 'confirmed', err: null };
+const submission = (overrides) => ({
+    signature: 'sig',
+    lastValidBlockHeight: 100n,
+    send: async () => {},
+    getStatus: async () => confirmed,
+    getBlockHeight: async () => 50n,
+    sleep: async () => {},
+    ...overrides,
+});
+
+test('a submission is confirmed once its signature is', async () => {
+    const statuses = [null, { confirmationStatus: 'processed', err: null }, confirmed];
+    assert.equal(await confirmSubmission(submission({ getStatus: async () => statuses.shift() })), 'sig');
+    assert.equal(statuses.length, 0);
+});
+
+test('a send that errors is still followed, and counts when the transaction lands', async () => {
+    const statuses = [null, null, confirmed];
+    const result = await confirmSubmission(
+        submission({
+            send: async () => {
+                throw new Error('socket hang up');
+            },
+            getStatus: async () => statuses.shift(),
+        }),
+    );
+    assert.equal(result, 'sig');
+});
+
+test('a send that errors and never lands fails with the send error once the blockhash has expired', async () => {
+    const heights = [50n, 50n, 101n];
+    let statusReads = 0;
+    const failure = await confirmSubmission(
+        submission({
+            send: async () => {
+                throw new Error('socket hang up');
+            },
+            getStatus: async () => {
+                statusReads += 1;
+                return null;
+            },
+            getBlockHeight: async () => heights.shift(),
+        }),
+    ).catch((error) => error);
+    assert.match(failure.message, /socket hang up/);
+    assert.ok(!(failure instanceof UnconfirmedError));
+    // Three reads while the blockhash was valid, one more after it expired.
+    assert.equal(statusReads, 4);
+});
+
+test('a transaction that lands in the last valid block is still found after expiry', async () => {
+    const statuses = [null, confirmed];
+    assert.equal(await confirmSubmission(submission({ getStatus: async () => statuses.shift(), getBlockHeight: async () => 101n })), 'sig');
+});
+
+test('a transaction that expires without a send error is reported as expired', async () => {
+    await assert.rejects(confirmSubmission(submission({ getStatus: async () => null, getBlockHeight: async () => 101n })), /expired before it was confirmed/);
+});
+
+test('a transaction that fails on chain is rejected with its error', async () => {
+    await assert.rejects(
+        confirmSubmission(submission({ getStatus: async () => ({ confirmationStatus: 'confirmed', err: { InstructionError: [1, { Custom: 6000n }] } }) })),
+        /transaction sig failed: .*InstructionError.*6000/,
+    );
+});
+
+test('a send error that proves the transaction was never broadcast stops at once', async () => {
+    let asked = false;
+    await assert.rejects(
+        confirmSubmission(
+            submission({
+                send: async () => {
+                    throw new Error('simulation failed');
+                },
+                isDefinitiveSendError: () => true,
+                getStatus: async () => {
+                    asked = true;
+                    return null;
+                },
+            }),
+        ),
+        /simulation failed/,
+    );
+    assert.equal(asked, false);
+});
+
+test('status errors are retried', async () => {
+    let calls = 0;
+    const result = await confirmSubmission(
+        submission({
+            getStatus: async () => {
+                calls += 1;
+                if (calls < 3) throw new Error('429');
+                return confirmed;
+            },
+        }),
+    );
+    assert.equal(result, 'sig');
+});
+
+test('when the cluster cannot be asked, the outcome is unknown rather than a failure', async () => {
+    let calls = 0;
+    const failure = await confirmSubmission(
+        submission({
+            getStatus: async () => {
+                calls += 1;
+                throw new Error('fetch failed');
+            },
+            maxFailures: 4,
+        }),
+    ).catch((error) => error);
+    assert.ok(failure instanceof UnconfirmedError);
+    assert.match(failure.message, /sig.*fetch failed/);
+    assert.equal(calls, 4);
+});
+
+test('an unconfirmed proposal is reported as unknown, with what to check', async () => {
+    const proposals = await splitForProposals(instructionsFromExport(exported, vault), { multisig, member: creator });
+    const recorded = [];
+    let calls = 0;
+    const failure = await createProposals(proposals, {
+        multisig,
+        creator,
+        firstIndex: 75,
+        send: async () => {
+            calls += 1;
+            if (calls === 3) throw new UnconfirmedError('could not ask the cluster about transaction sig: fetch failed');
+        },
+        onCreated: (proposal) => recorded.push(proposal),
+    }).catch((error) => error);
+    assert.match(failure.message, /could not confirm whether proposal 77 \(3 of 5\) was created/);
+    assert.match(failure.message, /Proposals 75, 76 were created before the failure\./);
+    assert.deepEqual(failure.unconfirmed, { index: 77, transaction: await findTransactionPda(multisig, 77), position: 3 });
+    assert.deepEqual(recorded.map((proposal) => proposal.index), [75, 76]);
 });

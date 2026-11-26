@@ -125,7 +125,9 @@ deployed, so the IDL describes the program that is on chain.
 - On a `squads-buffer` cluster the same happens without the proposals, as for
   deploys: the job summary lists base58 messages for the UI's Import
   Transaction dialog instead. The same messages are attached to every Squads
-  run, so an upload can be finished by hand if creating a proposal fails.
+  run, so an upload can be finished by hand if creating a proposal fails. The
+  summary then says which proposals exist, and names one whose creation could
+  not be confirmed either way.
 
 The converter and the Program Metadata CLI are pinned by
 `upload-idl/package-lock.json`. The Squads instructions are built on the

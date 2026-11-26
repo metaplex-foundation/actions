@@ -38,14 +38,24 @@ def with_block(pairs, indent=4):
     return "\n".join(lines) if len(lines) > 1 else ""
 
 
-def program_opts(indent=4):
+def runner(key, main=False):
+    """The runner label for a job. `runners` applies to every workflow;
+    `main_runners` overrides it in main.yml only, so pull request CI can move
+    to another runner provider while the release and deploy builds stay where
+    they are."""
+    if main and key in SPEC.get("main_runners", {}):
+        return SPEC["main_runners"][key]
+    return SPEC.get("runners", {}).get(key, "")
+
+
+def program_opts(indent=4, main=False):
     """`with:` entries every program-test job carries."""
     s = SPEC
     tp = s.get("test_programs", {})
     return [
         ("apt_packages", s.get("apt_packages", "")),
         ("sbf_tools_version", s.get("sbf_tools_version", "")),
-        ("runner", s.get("runners", {}).get("test_programs", "")),
+        ("runner", runner("test_programs", main)),
         ("free_disk_space", "true" if tp.get("free_disk_space") else ""),
         ("clippy_deny_warnings", "true" if tp.get("clippy_deny_warnings") else ""),
     ]
@@ -65,14 +75,14 @@ def rust_client_opts():
     ]
 
 
-def js_opts():
+def js_opts(main=False):
     """JS clients are tested on NODE_VERSION from .github/.env only: one Node
     release per repository, no matrix."""
     s = SPEC
     return [
         ("client_dir", s.get("js_client_dir", "")),
         ("lint", "false" if s.get("js_lint") is False else ""),
-        ("runner", s.get("runners", {}).get("test_js", "")),
+        ("runner", runner("test_js", main)),
     ]
 
 
@@ -132,10 +142,10 @@ def gen_main():
     out.append(job("build_programs", "Programs", "build-programs", needs="changes",
                    cond=f"needs.changes.outputs.{build_filter} == 'true'", perms=["contents: read"],
                    with_pairs=[("apt_packages", s.get("build_apt_packages", "")),
-                               ("runner", s.get("runners", {}).get("build_programs", ""))]))
+                               ("runner", runner("build_programs", main=True))]))
     out.append(job("test_programs", "Programs", "test-programs", needs="changes",
                    cond="needs.changes.outputs.programs == 'true'", perms=["contents: read"],
-                   with_pairs=[("program_matrix", "${{ needs.changes.outputs.program_matrix }}")] + program_opts()))
+                   with_pairs=[("program_matrix", "${{ needs.changes.outputs.program_matrix }}")] + program_opts(main=True)))
     if s.get("coverage"):
         cov = s["coverage"] if isinstance(s["coverage"], dict) else {}
         out.append(job("coverage", "Programs", "coverage", needs="changes",
@@ -143,7 +153,8 @@ def gen_main():
                        perms=["contents: read", "pull-requests: write"],
                        with_pairs=[("program_matrix", "${{ needs.changes.outputs.program_matrix }}"),
                                    ("apt_packages", s.get("apt_packages", "")),
-                                   ("pre_command", cov.get("pre_command", ""))]))
+                                   ("pre_command", cov.get("pre_command", "")),
+                                   ("runner", runner("coverage", main=True))]))
     # The client jobs test the committed clients against the program builds,
     # so they wait for build_programs only. generate_clients checks the
     # committed clients for drift from the program source and needs neither
@@ -153,11 +164,11 @@ def gen_main():
         out.append(job("generate_clients", "Generate clients", "generate-clients", needs="changes",
                        cond="needs.changes.outputs.any == 'true'", perms=["contents: read"],
                        with_pairs=[("install_anchor", "true" if s.get("install_anchor") else ""),
-                                   ("runner", s.get("runners", {}).get("generate_clients", ""))]))
+                                   ("runner", runner("generate_clients", main=True))]))
     if s.get("js_client", True):
         out.append(job("test_js", "JS Client", "test-js-client", needs=["changes", "build_programs"],
                        cond="needs.changes.outputs.js_client == 'true'", perms=["contents: read"],
-                       secrets_block=js_secrets(), with_pairs=js_opts()))
+                       secrets_block=js_secrets(), with_pairs=js_opts(main=True)))
     if s.get("benchmark"):
         bperms = ["contents: write", "deployments: write", "pull-requests: write"]
         out.append(job("benchmark", "Benchmark", "benchmark", needs="build_programs",
