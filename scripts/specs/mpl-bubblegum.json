@@ -1,5 +1,5 @@
 {
-  "actions_sha": "c52338cb2174341e2da73dc4396f23bd16d2efb9",
+  "actions_sha": "5bec5b35012af6b51252e9de7699f77c18759e11",
   "release_example": "release/bubblegum@0.13.0",
   "main": {
     "push_branches": [
@@ -94,5 +94,5 @@
   "publish_js": {
     "deploy_docs": true
   },
-  "actions_tag": "v2.2.3"
+  "actions_tag": "v2.2.4"
 }
