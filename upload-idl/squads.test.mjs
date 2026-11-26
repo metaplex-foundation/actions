@@ -24,6 +24,7 @@ import {
     toImportableMessage,
     UnconfirmedError,
 } from './squads.mjs';
+import { signatureStatus, transferSolInstruction } from './send.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const exported = readFileSync(join(here, 'fixtures', 'exported-transactions.txt'), 'utf8');
@@ -211,7 +212,7 @@ test('a send that errors is still followed, and counts when the transaction land
     assert.equal(result, 'sig');
 });
 
-test('a send that errors and never lands fails with the send error once the blockhash has expired', async () => {
+test('a send that errors and is never seen is unknown once the blockhash has expired', async () => {
     const heights = [50n, 50n, 101n];
     let statusReads = 0;
     const failure = await confirmSubmission(
@@ -226,8 +227,9 @@ test('a send that errors and never lands fails with the send error once the bloc
             getBlockHeight: async () => heights.shift(),
         }),
     ).catch((error) => error);
+    // The error does not prove the transaction was not broadcast.
+    assert.ok(failure instanceof UnconfirmedError);
     assert.match(failure.message, /socket hang up/);
-    assert.ok(!(failure instanceof UnconfirmedError));
     // Three reads while the blockhash was valid, one more after it expired.
     assert.equal(statusReads, 4);
 });
@@ -357,4 +359,34 @@ test('an unconfirmed proposal is reported as unknown, with what to check', async
     assert.match(failure.message, /Proposals 75, 76 were created before the failure\./);
     assert.deepEqual(failure.unconfirmed, { index: 77, transaction: await findTransactionPda(multisig, 77), position: 3 });
     assert.deepEqual(recorded.map((proposal) => proposal.index), [75, 76]);
+});
+
+test('the vault funding transfer matches the System Program transfer the CLI builds', () => {
+    // The first exported instruction is the vault paying 162570160 lamports
+    // of rent into the metadata account.
+    const [transfer] = instructionsFromExport(exported, vault)[0];
+    const metadata = transfer.accounts[1].address;
+    const ours = transferSolInstruction({ from: vault, to: metadata, lamports: '162570160' });
+    assert.deepEqual(plain(ours), plain(transfer));
+});
+
+test('the transfer amount must fit an unsigned 64-bit integer', () => {
+    const max = (1n << 64n) - 1n;
+    const data = transferSolInstruction({ from: vault, to: creator, lamports: max.toString() }).data;
+    assert.equal(new DataView(data.buffer).getBigUint64(4, true), max);
+    for (const lamports of ['18446744073709551616', '18446744074709551616', '0', '-1']) {
+        assert.throws(() => transferSolInstruction({ from: vault, to: creator, lamports }), /lamports/);
+    }
+});
+
+test('signature statuses are looked up in the transaction history, not just the recent cache', async () => {
+    const calls = [];
+    const rpc = {
+        getSignatureStatuses: (signatures, config) => {
+            calls.push({ signatures, config });
+            return { send: async () => ({ value: [{ confirmationStatus: 'confirmed', err: null }] }) };
+        },
+    };
+    assert.deepEqual(await signatureStatus(rpc, 'sig'), { confirmationStatus: 'confirmed', err: null });
+    assert.deepEqual(calls, [{ signatures: ['sig'], config: { searchTransactionHistory: true } }]);
 });

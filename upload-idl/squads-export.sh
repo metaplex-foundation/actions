@@ -33,7 +33,7 @@
 #                 member of the multisig); anything else only writes messages
 #   ZLIB_BYTES    optional compressed IDL size, for the balance check
 #
-# Requires: curl, jq, node, solana, solana-keygen.
+# Requires: curl, jq, node, solana-keygen.
 
 set -euo pipefail
 
@@ -108,7 +108,7 @@ METADATA="$(node "$TOOLS/metadata-address.mjs" "$PROGRAM_ID")"
 METADATA_SPACE="$(account_space "$METADATA")"
 BUFFER=""
 FUNDED=0
-# Rent whose transfer reported an error and did not show in the vault's balance.
+# Rent whose transfer was sent but could not be confirmed either way.
 FUNDING_UNSEEN=0
 HANDED_OVER=false
 
@@ -127,7 +127,7 @@ cleanup() {
   fi
   # Reported whether or not a buffer is left: this is about the vault.
   if [ "$status" -ne 0 ] && [ "$FUNDING_UNSEEN" -gt 0 ]; then
-    echo "::warning::A transfer of $(sol "$FUNDING_UNSEEN") SOL to vault $VAULT reported an error and did not show in the vault's balance, but may still have been sent. Check the vault before the next run, which sends that amount again."
+    echo "::warning::A transfer of $(sol "$FUNDING_UNSEEN") SOL to vault $VAULT was sent but could not be confirmed, so it may have landed (see the signature in fund-vault.log). Check before the next run, which sends that amount again."
   fi
   exit "$status"
 }
@@ -206,24 +206,19 @@ FUNDING="$(metadata_funding "$BUFFER_SPACE")" || fail "Could not read the rent f
 
 if [ "$FUNDING" -gt 0 ]; then
   echo "Sending $(sol "$FUNDING") SOL to the vault for the metadata account's rent" >&2
-  VAULT_BEFORE="$(balance "$VAULT")" || fail "Could not read the vault's balance"
-  if solana transfer --url "$RPC_URL" --keypair "$BOT_KEYPAIR" --fee-payer "$BOT_KEYPAIR" \
-    --allow-unfunded-recipient "$VAULT" "$(sol "$FUNDING")" >&2; then
-    FUNDED="$FUNDING"
-  else
-    # The CLI can report an error for a transfer that landed, when it could
-    # not confirm it. The vault's balance says which: a rise of at least the
-    # amount means the rent is there, and the upload goes on.
-    sleep "${FUNDING_RECHECK_SECONDS:-15}"
-    VAULT_AFTER="$(balance "$VAULT")" || VAULT_AFTER="$VAULT_BEFORE"
-    if [ $((VAULT_AFTER - VAULT_BEFORE)) -ge "$FUNDING" ]; then
-      echo "::warning::solana transfer reported an error, but the vault's balance rose by the rent: continuing."
-      FUNDED="$FUNDING"
-    else
+  # Followed by its own signature, so only the bot's transfer counts: a
+  # deposit into the vault from anyone else does not.
+  FUND_STATUS=0
+  node "$TOOLS/fund-vault.mjs" --keypair "$BOT_KEYPAIR" --rpc "$RPC_URL" --to "$VAULT" --lamports "$FUNDING" > "$OUT_DIR/fund-vault.log" || FUND_STATUS=$?
+  cat "$OUT_DIR/fund-vault.log" >&2
+  case "$FUND_STATUS" in
+    0) FUNDED="$FUNDING" ;;
+    2)
       FUNDING_UNSEEN="$FUNDING"
-      fail "Could not send the vault the rent for the metadata account"
-    fi
-  fi
+      fail "The transfer of the metadata account's rent to the vault was sent, but whether it landed could not be determined"
+      ;;
+    *) fail "Could not send the vault the rent for the metadata account" ;;
+  esac
 fi
 
 echo "Handing the buffer to the vault" >&2
