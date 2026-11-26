@@ -24,6 +24,7 @@ import {
     toImportableMessage,
     UnconfirmedError,
 } from './squads.mjs';
+import { transferSolInstruction } from './send.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const exported = readFileSync(join(here, 'fixtures', 'exported-transactions.txt'), 'utf8');
@@ -357,4 +358,13 @@ test('an unconfirmed proposal is reported as unknown, with what to check', async
     assert.match(failure.message, /Proposals 75, 76 were created before the failure\./);
     assert.deepEqual(failure.unconfirmed, { index: 77, transaction: await findTransactionPda(multisig, 77), position: 3 });
     assert.deepEqual(recorded.map((proposal) => proposal.index), [75, 76]);
+});
+
+test('the vault funding transfer matches the System Program transfer the CLI builds', () => {
+    // The first exported instruction is the vault paying 162570160 lamports
+    // of rent into the metadata account.
+    const [transfer] = instructionsFromExport(exported, vault)[0];
+    const metadata = transfer.accounts[1].address;
+    const ours = transferSolInstruction({ from: vault, to: metadata, lamports: '162570160' });
+    assert.deepEqual(plain(ours), plain(transfer));
 });
