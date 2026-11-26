@@ -154,11 +154,80 @@ export async function proposalInstructions(instructions, { multisig, creator, tr
     return { transaction, instructions: out };
 }
 
+/** The cluster could not be asked whether a transaction landed: its outcome is unknown. */
+export class UnconfirmedError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'UnconfirmedError';
+    }
+}
+
+/**
+ * Sends a signed transaction and follows its signature until it is confirmed
+ * or can no longer land. A send that errors is not proof that the transaction
+ * was not accepted (the response may be all that was lost), so the signature
+ * is followed either way; only `isDefinitiveSendError` stops at once.
+ *
+ * Rejects with the on-chain or send error when the transaction did not land,
+ * and with UnconfirmedError when the cluster stops answering before that is
+ * known.
+ */
+export async function confirmSubmission({
+    signature,
+    lastValidBlockHeight,
+    send,
+    getStatus,
+    getBlockHeight,
+    sleep,
+    isDefinitiveSendError = () => false,
+    maxFailures = 30,
+}) {
+    let sendError = null;
+    try {
+        await send();
+    } catch (error) {
+        if (isDefinitiveSendError(error)) throw error;
+        sendError = error;
+    }
+    let failures = 0;
+    let expired = false;
+    for (;;) {
+        let status;
+        let height;
+        try {
+            status = await getStatus();
+            if (!status && !expired) height = await getBlockHeight();
+        } catch (error) {
+            failures += 1;
+            if (failures >= maxFailures) {
+                throw new UnconfirmedError(`could not ask the cluster about transaction ${signature}: ${error.message}`);
+            }
+            await sleep(1000);
+            continue;
+        }
+        failures = 0;
+        if (status?.err) {
+            const detail = JSON.stringify(status.err, (_, value) => (typeof value === 'bigint' ? value.toString() : value));
+            throw new Error(`transaction ${signature} failed: ${detail}`);
+        }
+        if (status?.confirmationStatus === 'confirmed' || status?.confirmationStatus === 'finalized') return signature;
+        // No status after the blockhash expired, read once more after expiry: it cannot land any more.
+        if (expired && !status) throw sendError ?? new Error(`transaction ${signature} expired before it was confirmed`);
+        if (height !== undefined && height > lastValidBlockHeight) {
+            expired = true;
+            continue;
+        }
+        await sleep(1000);
+    }
+}
+
 /**
  * Creates the proposals one after the other, numbered from `firstIndex`.
  * `send` submits and confirms one proposal's instructions; `onCreated` is
  * called as soon as a proposal exists, before the next one is attempted, so
- * that a failure partway leaves a record of what was created.
+ * that a failure partway leaves a record of what was created. When `send`
+ * rejects with UnconfirmedError the proposal may exist, and the error thrown
+ * carries `unconfirmed` (its index, account and position) to report that.
  */
 export async function createProposals(proposals, { multisig, creator, firstIndex, send, onCreated }) {
     const created = [];
@@ -169,7 +238,16 @@ export async function createProposals(proposals, { multisig, creator, firstIndex
             await send(proposal.instructions);
         } catch (error) {
             const done = created.length > 0 ? ` Proposals ${created.map((p) => p.index).join(', ')} were created before the failure.` : '';
-            throw new Error(`could not create proposal ${index} (${offset + 1} of ${proposals.length}): ${error.message}.${done}`);
+            const place = `proposal ${index} (${offset + 1} of ${proposals.length})`;
+            if (error instanceof UnconfirmedError) {
+                // It may exist: say so, instead of sending the reader to create it again.
+                const unknown = new Error(
+                    `could not confirm whether ${place} was created: ${error.message}. Check the multisig for proposal ${index} before importing message ${offset + 1}.${done}`,
+                );
+                unknown.unconfirmed = { index, transaction: proposal.transaction, position: offset + 1 };
+                throw unknown;
+            }
+            throw new Error(`could not create ${place}: ${error.message}.${done}`);
         }
         const record = { index, transaction: proposal.transaction };
         created.push(record);

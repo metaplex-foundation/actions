@@ -344,6 +344,7 @@ jobs:
           path: |
             ${{ runner.temp }}/upload-idl/squads/messages.txt
             ${{ runner.temp }}/upload-idl/squads/proposals.txt
+            ${{ runner.temp }}/upload-idl/squads/unconfirmed.txt
             ${{ runner.temp }}/upload-idl/squads/instructions.txt
           if-no-files-found: warn
 
@@ -426,7 +427,13 @@ jobs:
                 done < "$SQUADS_DIR/proposals.txt"
                 echo
               fi
-              if [ "$CREATED" -lt "$transactions" ]; then
+              if [ -s "$SQUADS_DIR/unconfirmed.txt" ]; then
+                # The transaction that creates this proposal was sent, but the
+                # cluster could not be asked whether it landed.
+                read -r INDEX ACCOUNT POSITION < "$SQUADS_DIR/unconfirmed.txt"
+                echo "**Proposal #$INDEX (\`$ACCOUNT\`) may or may not exist.** Its transaction was sent, but the cluster could not be asked whether it landed. Look for #$INDEX on the Transactions page before importing anything: if it is there, import from message $((POSITION + 1)) on; if it is not, from message $POSITION on."
+                echo
+              elif [ "$CREATED" -lt "$transactions" ]; then
                 if [ "$CREATED" -gt 0 ]; then
                   echo "**Only $CREATED of $transactions proposals were created.** Import the remaining messages below, from message $((CREATED + 1)) on."
                 else

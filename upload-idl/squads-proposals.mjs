@@ -16,7 +16,10 @@
 // (a member of the multisig) and writes <out-dir>/proposals.txt, one
 // "<transaction index> <transaction account>" line per proposal, appended as
 // each one is created: after a failure the file lists the proposals that
-// exist. The keypair never approves: the members still approve and execute.
+// exist. If the cluster could not be asked whether a proposal's transaction
+// landed, <out-dir>/unconfirmed.txt names it ("<index> <account> <message
+// number>"): it may or may not exist. The keypair never approves: the members
+// still approve and execute.
 //
 // Fails with a workflow error annotation.
 
@@ -33,14 +36,17 @@ import {
     getBase64EncodedWireTransaction,
     getBase64Encoder,
     getSignatureFromTransaction,
+    isSolanaError,
     pipe,
     setTransactionMessageFeePayerSigner,
     setTransactionMessageLifetimeUsingBlockhash,
     signTransactionMessageWithSigners,
+    SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE,
 } from '@solana/kit';
 
 import {
     COMPUTE_BUDGET_PROGRAM,
+    confirmSubmission,
     createProposals,
     findAuthorityPda,
     instructionsFromExport,
@@ -86,19 +92,20 @@ async function sendAndConfirm(rpc, signer, instructions) {
         ),
     );
     const signature = getSignatureFromTransaction(signed);
-    await rpc
-        .sendTransaction(getBase64EncodedWireTransaction(signed), { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 5n })
-        .send();
-    // Poll instead of subscribing: no websocket endpoint is needed.
-    for (;;) {
-        const { value } = await rpc.getSignatureStatuses([signature]).send();
-        const status = value[0];
-        if (status?.err) throw new Error(`transaction ${signature} failed: ${JSON.stringify(status.err, (_, v) => (typeof v === 'bigint' ? v.toString() : v))}`);
-        if (status?.confirmationStatus === 'confirmed' || status?.confirmationStatus === 'finalized') return signature;
-        const height = await rpc.getBlockHeight({ commitment: 'confirmed' }).send();
-        if (height > lifetime.lastValidBlockHeight) throw new Error(`transaction ${signature} expired before it was confirmed`);
-        await sleep(1000);
-    }
+    // Polls instead of subscribing, so no websocket endpoint is needed.
+    return confirmSubmission({
+        signature,
+        lastValidBlockHeight: lifetime.lastValidBlockHeight,
+        send: () =>
+            rpc
+                .sendTransaction(getBase64EncodedWireTransaction(signed), { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 5n })
+                .send(),
+        getStatus: async () => (await rpc.getSignatureStatuses([signature]).send()).value[0],
+        getBlockHeight: () => rpc.getBlockHeight({ commitment: 'confirmed' }).send(),
+        sleep,
+        // The node simulated the transaction, it failed, and it was not broadcast.
+        isDefinitiveSendError: (error) => isSolanaError(error, SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE),
+    });
 }
 
 // One atomic transaction when it fits, which the split guarantees in
@@ -191,7 +198,16 @@ try {
 
     if (values.propose) {
         if (!values.keypair || !values.rpc) throw new Error('--propose needs --keypair and --rpc');
-        await propose(proposals, { multisig, keypair: values.keypair, rpcUrl: values.rpc, record: join(values['out-dir'], 'proposals.txt') });
+        try {
+            await propose(proposals, { multisig, keypair: values.keypair, rpcUrl: values.rpc, record: join(values['out-dir'], 'proposals.txt') });
+        } catch (error) {
+            // A proposal whose transaction could not be followed may exist.
+            if (error.unconfirmed) {
+                const { index, transaction, position } = error.unconfirmed;
+                writeFileSync(join(values['out-dir'], 'unconfirmed.txt'), `${index} ${transaction} ${position}\n`);
+            }
+            throw error;
+        }
     }
 } catch (error) {
     console.log(`::error::${String(error.message ?? error).replace(/\r?\n/g, ' ')}`);
