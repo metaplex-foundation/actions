@@ -298,6 +298,47 @@ test('when the cluster cannot be asked, the outcome is unknown rather than a fai
     assert.equal(calls, 4);
 });
 
+test('a transaction that stays processed is given up on as unknown once its blockhash has expired', async () => {
+    let reads = 0;
+    const failure = await confirmSubmission(
+        submission({
+            getStatus: async () => {
+                reads += 1;
+                return { confirmationStatus: 'processed', err: null };
+            },
+            getBlockHeight: async () => 101n,
+            maxPollsAfterExpiry: 3,
+        }),
+    ).catch((error) => error);
+    assert.ok(failure instanceof UnconfirmedError);
+    assert.match(failure.message, /sig.*not confirmed/);
+    // One read that finds the blockhash expired, then three more.
+    assert.equal(reads, 4);
+});
+
+test('a transaction that stays processed is still followed while its blockhash is valid, then bounded', async () => {
+    const heights = [50n, 50n, 50n, 101n];
+    let reads = 0;
+    const failure = await confirmSubmission(
+        submission({
+            getStatus: async () => {
+                reads += 1;
+                return { confirmationStatus: 'processed', err: null };
+            },
+            getBlockHeight: async () => heights.shift() ?? 101n,
+            maxPollsAfterExpiry: 2,
+        }),
+    ).catch((error) => error);
+    assert.ok(failure instanceof UnconfirmedError);
+    assert.equal(reads, 6);
+});
+
+test('a processed transaction that is confirmed after the blockhash expired still counts', async () => {
+    const processed = { confirmationStatus: 'processed', err: null };
+    const statuses = [processed, processed, confirmed];
+    assert.equal(await confirmSubmission(submission({ getStatus: async () => statuses.shift(), getBlockHeight: async () => 101n })), 'sig');
+});
+
 test('an unconfirmed proposal is reported as unknown, with what to check', async () => {
     const proposals = await splitForProposals(instructionsFromExport(exported, vault), { multisig, member: creator });
     const recorded = [];
