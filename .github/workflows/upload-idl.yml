@@ -446,9 +446,16 @@ jobs:
               echo "They were built against the current on-chain state: run this workflow again if the IDL account changes before they execute."
               echo
               if [ "$CREATED" -lt "$transactions" ]; then
+                # Messages whose proposals exist are left out: importing one
+                # would duplicate a pending proposal.
+                if [ "$CREATED" -gt 0 ]; then
+                  echo "Messages 1 to $CREATED are not listed: their proposals exist."
+                  echo
+                fi
                 N=0
                 while IFS= read -r MESSAGE; do
                   N=$((N + 1))
+                  [ "$N" -gt "$CREATED" ] || continue
                   echo "**Message $N**"
                   echo
                   echo '```'
