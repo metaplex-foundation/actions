@@ -40,6 +40,15 @@ function withSigner(instruction, signer) {
     };
 }
 
+/**
+ * The status of one signature. The transaction history is searched, not only
+ * the recent status cache, so a transaction that landed is still found after
+ * the cache has dropped it.
+ */
+export async function signatureStatus(rpc, signature) {
+    return (await rpc.getSignatureStatuses([signature], { searchTransactionHistory: true }).send()).value[0];
+}
+
 export async function sendAndConfirm(rpc, signer, instructions) {
     const { value: lifetime } = await rpc.getLatestBlockhash({ commitment: 'confirmed' }).send();
     const signed = await signTransactionMessageWithSigners(
@@ -59,7 +68,7 @@ export async function sendAndConfirm(rpc, signer, instructions) {
             rpc
                 .sendTransaction(getBase64EncodedWireTransaction(signed), { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 5n })
                 .send(),
-        getStatus: async () => (await rpc.getSignatureStatuses([signature]).send()).value[0],
+        getStatus: () => signatureStatus(rpc, signature),
         getBlockHeight: () => rpc.getBlockHeight({ commitment: 'confirmed' }).send(),
         sleep,
         // The node simulated the transaction, it failed, and it was not broadcast.
@@ -70,10 +79,15 @@ export async function sendAndConfirm(rpc, signer, instructions) {
 
 /** A System Program transfer of `lamports` from the signer `from` to `to`. */
 export function transferSolInstruction({ from, to, lamports }) {
+    // setBigUint64 wraps out-of-range values silently: check first.
+    const amount = BigInt(lamports);
+    if (amount <= 0n || amount > (1n << 64n) - 1n) {
+        throw new Error(`lamports must be between 1 and 2^64 - 1, got ${lamports}`);
+    }
     const data = new Uint8Array(12);
     const view = new DataView(data.buffer);
     view.setUint32(0, 2, true); // Transfer
-    view.setBigUint64(4, BigInt(lamports), true);
+    view.setBigUint64(4, amount, true);
     return {
         programAddress: '11111111111111111111111111111111',
         accounts: [

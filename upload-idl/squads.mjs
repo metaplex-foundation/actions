@@ -168,10 +168,11 @@ export class UnconfirmedError extends Error {
  * was not accepted (the response may be all that was lost), so the signature
  * is followed either way; only `isDefinitiveSendError` stops at once.
  *
- * Rejects with the on-chain or send error when the transaction did not land,
- * and with UnconfirmedError when that cannot be known: the cluster stops
- * answering, or the transaction is seen but stays unconfirmed past its
- * blockhash. Every path ends.
+ * Rejects with the on-chain error, a definitive send error, or an expiry
+ * when the transaction did not land, and with UnconfirmedError when that
+ * cannot be known: the cluster stops answering, the transaction is seen but
+ * stays unconfirmed past its blockhash, or a send that errored is never seen.
+ * Every path ends.
  */
 export async function confirmSubmission({
     signature,
@@ -219,7 +220,17 @@ export async function confirmSubmission({
         if (isConfirmed(status)) return signature;
         if (expired) {
             // No status, read once more after the expiry: it cannot land any more.
-            if (!status) throw sendError ?? new Error(`transaction ${signature} expired before it was confirmed`);
+            if (!status) {
+                // A send that errored may still have been broadcast, and an
+                // RPC without the history may not see a landed transaction:
+                // only a clean send that is never seen is known to have failed.
+                if (sendError) {
+                    throw new UnconfirmedError(
+                        `sending transaction ${signature} failed (${sendError.message}) and it was not seen after its blockhash expired`,
+                    );
+                }
+                throw new Error(`transaction ${signature} expired before it was confirmed`);
+            }
             // Seen but not confirmed. It should settle within a few slots;
             // if it does not, stop waiting and say the outcome is unknown.
             pollsAfterExpiry += 1;
