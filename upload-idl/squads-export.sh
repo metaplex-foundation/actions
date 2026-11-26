@@ -108,6 +108,8 @@ METADATA="$(node "$TOOLS/metadata-address.mjs" "$PROGRAM_ID")"
 METADATA_SPACE="$(account_space "$METADATA")"
 BUFFER=""
 FUNDED=0
+# Rent whose transfer reported an error and did not show in the vault's balance.
+FUNDING_UNSEEN=0
 HANDED_OVER=false
 
 # A buffer the vault never received is of no use to anyone: give its rent
@@ -122,6 +124,10 @@ cleanup() {
     if [ "$FUNDED" -gt 0 ]; then
       echo "::warning::Vault $VAULT already received $(sol "$FUNDED") SOL for the metadata account's rent. The next run sends that amount again, so the vault keeps this one as a surplus to withdraw."
     fi
+  fi
+  # Reported whether or not a buffer is left: this is about the vault.
+  if [ "$status" -ne 0 ] && [ "$FUNDING_UNSEEN" -gt 0 ]; then
+    echo "::warning::A transfer of $(sol "$FUNDING_UNSEEN") SOL to vault $VAULT reported an error and did not show in the vault's balance, but may still have been sent. Check the vault before the next run, which sends that amount again."
   fi
   exit "$status"
 }
@@ -200,9 +206,24 @@ FUNDING="$(metadata_funding "$BUFFER_SPACE")" || fail "Could not read the rent f
 
 if [ "$FUNDING" -gt 0 ]; then
   echo "Sending $(sol "$FUNDING") SOL to the vault for the metadata account's rent" >&2
-  solana transfer --url "$RPC_URL" --keypair "$BOT_KEYPAIR" --fee-payer "$BOT_KEYPAIR" \
-    --allow-unfunded-recipient "$VAULT" "$(sol "$FUNDING")" >&2
-  FUNDED="$FUNDING"
+  VAULT_BEFORE="$(balance "$VAULT")" || fail "Could not read the vault's balance"
+  if solana transfer --url "$RPC_URL" --keypair "$BOT_KEYPAIR" --fee-payer "$BOT_KEYPAIR" \
+    --allow-unfunded-recipient "$VAULT" "$(sol "$FUNDING")" >&2; then
+    FUNDED="$FUNDING"
+  else
+    # The CLI can report an error for a transfer that landed, when it could
+    # not confirm it. The vault's balance says which: a rise of at least the
+    # amount means the rent is there, and the upload goes on.
+    sleep "${FUNDING_RECHECK_SECONDS:-15}"
+    VAULT_AFTER="$(balance "$VAULT")" || VAULT_AFTER="$VAULT_BEFORE"
+    if [ $((VAULT_AFTER - VAULT_BEFORE)) -ge "$FUNDING" ]; then
+      echo "::warning::solana transfer reported an error, but the vault's balance rose by the rent: continuing."
+      FUNDED="$FUNDING"
+    else
+      FUNDING_UNSEEN="$FUNDING"
+      fail "Could not send the vault the rent for the metadata account"
+    fi
+  fi
 fi
 
 echo "Handing the buffer to the vault" >&2
