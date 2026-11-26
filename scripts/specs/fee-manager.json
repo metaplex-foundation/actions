@@ -1,5 +1,5 @@
 {
-  "actions_sha": "7c53cc549762ac481eff98439af60a9f26c3bed1",
+  "actions_sha": "58e51083a7cdf59068282913ec93994e989d4b61",
   "release_example": "release/fee-manager@0.1.1",
   "main": {
     "push_branches": [
@@ -61,5 +61,5 @@
     "configs/scripts/program/dump.sh",
     "configs/scripts/program/dump-devnet.sh"
   ],
-  "actions_tag": "v2.2.1"
+  "actions_tag": "v2.2.2"
 }
