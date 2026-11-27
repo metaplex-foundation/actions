@@ -45,7 +45,19 @@ runs:
     - name: Install Solana
       if: inputs.cache != 'true' || steps.cache.outputs.cache-hit != 'true'
       run: |
-        sh -c "$(curl -sSfL ${{ steps.base_url.outputs.base_url }}/v${{ inputs.version }}/install)"
+        version="${{ inputs.version }}"
+        install_url="${{ steps.base_url.outputs.base_url }}"
+        
+        case "$version" in
+          stable|edge|beta)
+            install_url="$install_url/$version/install"
+            ;;
+          *)
+            install_url="$install_url/v$version/install"
+            ;;
+        esac
+        
+        sh -c "$(curl -sSfL $install_url)"
       shell: bash
 
     - name: Set Active Solana Version
