@@ -193,7 +193,7 @@ jobs:
 
       - name: Create release pull request
         if: ${{ !inputs.dry_run }}
-        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        uses: peter-evans/create-pull-request@3ffccacd46053766916f087ce41d627c0b8cf2d1 # v8.1.3
         with:
           commit-message: 'chore: release ${{ steps.release.outputs.name }} v${{ steps.release.outputs.version }}'
           # The crate name is part of the branch so repos with several Rust
